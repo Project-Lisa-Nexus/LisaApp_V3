@@ -1,0 +1,169 @@
+package com.lisa.app;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Bundle;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.GridLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+public class HomeActivity extends Activity {
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private static final String COLORE_SFONDO_ROOT = "#0A1128";
+    private static final String COLORE_SFONDO_SCHEDA = "#1C2E4A";
+    private static final String COLORE_BORDO_SCHEDA = "#4FC3F7";
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        // Radice FrameLayout
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.parseColor(COLORE_SFONDO_ROOT));
+
+        // Contenitore verticale con altezza esplicita match_parent (con margine inferiore per la bottomBar)
+        LinearLayout verticalContainer = new LinearLayout(this);
+        verticalContainer.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout.LayoutParams lpVertical = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        );
+        lpVertical.bottomMargin = dp(60);
+        root.addView(verticalContainer, lpVertical);
+
+        // Figlio 1: topSpace (zona vuota superiore)
+        View topSpace = new View(this);
+        LinearLayout.LayoutParams lpTopSpace = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.5f);
+        verticalContainer.addView(topSpace, lpTopSpace);
+
+        // Figlio 2: ScrollView (zona scorrevole)
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout.LayoutParams lpScroll = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.5f);
+        verticalContainer.addView(scroll, lpScroll);
+
+        // GridLayout dentro ScrollView
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        grid.setPadding(dp(12), dp(12), dp(12), dp(12));
+        scroll.addView(grid, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        // 4 Schede
+        grid.addView(createCard("Lisa AI", R.drawable.ic_home_ai, 0));
+        grid.addView(createCard("Lisa Pad", R.drawable.ic_home_pad, 1));
+        grid.addView(createCard("Lisa Voice", R.drawable.ic_home_voice, 0));
+        grid.addView(createCard("Lisa Eye", R.drawable.ic_home_eye, 1));
+
+        // BottomBar nel FrameLayout radice, posizionata in basso (gravity BOTTOM)
+        LinearLayout bottomBar = new LinearLayout(this);
+        bottomBar.setOrientation(LinearLayout.HORIZONTAL);
+        bottomBar.setGravity(Gravity.CENTER);
+        bottomBar.setBackgroundColor(Color.parseColor(COLORE_SFONDO_ROOT));
+        bottomBar.setPadding(0, dp(8), 0, dp(8));
+
+        bottomBar.addView(createBottomIcon(R.drawable.ic_home_home));
+        bottomBar.addView(createBottomIcon(R.drawable.ic_home_star));
+        bottomBar.addView(createBottomIcon(R.drawable.ic_home_profile));
+        bottomBar.addView(createBottomIcon(R.drawable.ic_home_menu));
+
+        FrameLayout.LayoutParams lpBottomBar = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(60));
+        lpBottomBar.gravity = Gravity.BOTTOM;
+        root.addView(bottomBar, lpBottomBar);
+
+        // Freccia in alto a destra nel FrameLayout radice
+        ImageView arrow = new ImageView(this);
+        arrow.setImageResource(R.drawable.ic_home_arrow);
+        arrow.setPadding(dp(16), dp(16), dp(16), dp(16));
+        arrow.setOnClickListener(v -> startActivity(new Intent(HomeActivity.this, MainActivity.class)));
+
+        FrameLayout.LayoutParams lpArrow = new FrameLayout.LayoutParams(dp(64), dp(64));
+        lpArrow.gravity = Gravity.TOP | Gravity.END;
+        lpArrow.topMargin = dp(8);
+        lpArrow.rightMargin = dp(8);
+        root.addView(arrow, lpArrow);
+
+        setContentView(root);
+    }
+
+    private View createCard(String title, int iconResId, int col) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+
+        GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+        lp.width = 0;
+        lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        lp.columnSpec = GridLayout.spec(col, 1f);
+        lp.setMargins(dp(8), dp(8), dp(8), dp(8));
+        card.setLayoutParams(lp);
+
+        card.setPadding(dp(16), dp(20), dp(16), dp(20));
+
+        // Sfondo scheda blu notte con bordo ciano uniforme
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setColor(Color.parseColor(COLORE_SFONDO_SCHEDA));
+        bg.setCornerRadius(dp(16));
+        bg.setStroke(dp(2), Color.parseColor(COLORE_BORDO_SCHEDA));
+        card.setBackground(bg);
+
+        // Cerchio con icona oppure emoji per Lisa AI
+        FrameLayout circle = new FrameLayout(this);
+        GradientDrawable circleBg = new GradientDrawable();
+        circleBg.setShape(GradientDrawable.OVAL);
+        circleBg.setColor(Color.parseColor("#1A73E8"));
+        circle.setBackground(circleBg);
+
+        if (iconResId == R.drawable.ic_home_ai) {
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(R.drawable.ic_home_brain);
+            icon.setPadding(dp(8), dp(8), dp(8), dp(8));
+            circle.addView(icon, new FrameLayout.LayoutParams(dp(40), dp(40)));
+        } else {
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(iconResId);
+            icon.setPadding(dp(8), dp(8), dp(8), dp(8));
+            circle.addView(icon, new FrameLayout.LayoutParams(dp(40), dp(40)));
+        }
+
+        card.addView(circle, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        TextView tv = new TextView(this);
+        tv.setText(title);
+        tv.setTextColor(Color.WHITE);
+        tv.setTextSize(14);
+        tv.setTypeface(null, Typeface.BOLD);
+        tv.setPadding(0, dp(12), 0, 0);
+        card.addView(tv);
+
+        return card;
+    }
+
+    private View createBottomIcon(int iconResId) {
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(iconResId);
+        iv.setPadding(dp(12), dp(12), dp(12), dp(12));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        iv.setLayoutParams(lp);
+        return iv;
+    }
+}

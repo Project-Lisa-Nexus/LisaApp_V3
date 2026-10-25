@@ -1,0 +1,5314 @@
+package com.lisa.app;
+
+import android.accessibilityservice.AccessibilityService;
+import android.content.Context;
+import android.content.Intent;
+import android.util.Log;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+public class LisaAccessibilityService extends AccessibilityService {
+    private static final String TAG = "LisaAccessibility";
+
+    private static final int BADGE_LATO_DP = 24;
+    private static final int BADGE_OFFSET_DP = 4;
+    private static final int BADGE_SOGLIA_CENTRO_DP = 40;
+    private static final float OVERLAY_TEXT_SP = 15f;
+    private static final int OVERLAY_BG_COLOR = 0x80202020;
+    private static LisaAccessibilityService instance;
+    private java.util.List<NodoCliccabile> ultimaListaNumeri = null;
+
+    private android.view.WindowManager indicatoreWindowManager;
+    private android.view.View indicatoreLisa;
+    private android.view.WindowManager.LayoutParams indicatoreLp;
+    private volatile boolean indicatoreAscolto = false;
+
+    private android.content.Context grigliaOverlayContext;
+    private android.view.WindowManager grigliaWindowManager;
+    private android.widget.FrameLayout grigliaNumeriContainer;
+    private volatile boolean grigliaVisibile = false;
+
+    private final java.util.ArrayList<android.graphics.Rect> grigliaCelle =
+            new java.util.ArrayList<>();
+    private android.graphics.Rect grigliaAreaAttiva = null;
+    private int grigliaLivello = 0;
+    private volatile boolean grigliaRiapriDopoTap = false;
+    private volatile int grigliaTapGen = 0;
+    private static android.view.WindowManager sWm = null;
+    private static android.widget.FrameLayout sView = null;
+
+    private android.view.SurfaceControlViewHost grigliaViewHost;
+    private android.view.SurfaceControlViewHost.SurfacePackage grigliaSurfacePackage;
+    private android.view.SurfaceControl grigliaSurfaceControl;
+    private int grigliaWindowId = -1;
+    private String grigliaPackageOrigine = "";
+
+    private enum ModalitaOverlay {
+        NUMERI, ETICHETTE, GRIGLIA
+    }
+
+    private ModalitaOverlay grigliaModalita = null;
+    private final android.os.Handler grigliaHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private LisaDockView dockView = null;
+    private volatile boolean servizioAttivo = false;
+    private final Runnable grigliaAutoHide = this::nascondiOverlay;
+
+    private static final long OVERLAY_REFRESH_MS = 250L;
+    private final Runnable overlayRefresh = () -> {
+        if (!grigliaVisibile || grigliaModalita == null) return;
+        ModalitaOverlay modo = grigliaModalita;
+        Log.i(TAG,"OVERLAY_REFRESH modo="+modo);
+        mostraOverlay(modo);
+    };
+
+    private void programmaRefreshOverlay() {
+        grigliaHandler.removeCallbacks(overlayRefresh);
+        grigliaHandler.postDelayed(overlayRefresh, OVERLAY_REFRESH_MS);
+    }
+
+    private android.view.WindowManager sempliceWindowManager;
+    private android.widget.TextView indicatoreSemplice;
+    private android.view.WindowManager.LayoutParams indicatoreSempliceLp;
+    private Runnable sempliceAutohideRunnable;
+
+    private android.view.WindowManager telemetriaWindowManager;
+    private android.view.View indicatoreTelemetria;
+    private android.view.WindowManager.LayoutParams indicatoreTelemetriaLp;
+
+    private android.widget.TextView telemetriaAscoltato;
+    private android.widget.TextView telemetriaInterpretato;
+    private android.widget.TextView telemetriaAzione;
+    private android.widget.TextView telemetriaRisultato;
+
+    // ===== CONTEXT ENGINE V1 =====
+    private volatile String contestoPacchetto = "";
+
+    private volatile String toggleSettingsPackage = null;
+    private volatile String contestoClasse = "";
+    private volatile int contestoWindowId = -1;
+    private volatile boolean contestoFocusInput = false;
+    private volatile boolean contestoEditabile = false;
+    private volatile long contestoTimestamp = 0L;
+
+    private volatile String[] toggleSettingsEtichette = null;
+    private volatile Boolean toggleSettingsStato = null;
+    private volatile ToggleResultCallback toggleSettingsCallback = null;
+    private volatile boolean toggleSettingsTentativoProgrammato = false;
+    private volatile boolean toggleSettingsRetryInCorso = false;
+    private int toggleSettingsGiro = 0;
+
+    private final android.os.Handler toggleSettingsHandler =
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()
+            );
+
+    private final Runnable toggleSettingsTimeout = () -> {
+        ToggleResultCallback callback =
+                toggleSettingsCallback;
+
+        if (callback == null) return;
+
+        pulisciToggleSettingsPendente();
+
+        callback.onResult(
+                false,
+                null,
+                "settings_timeout"
+        );
+    };
+
+    private final Runnable toggleSettingsEsegui =
+            this::eseguiToggleSettingsPendente;
+
+    private final Runnable toggleSettingsRetry =
+            this::eseguiRetryToggleSettings;
+
+    private ThermalSafetyMonitor thermalSafetyMonitor;
+
+    @Override
+    protected void onServiceConnected() {
+        super.onServiceConnected();
+        instance = this;
+        // 🟢 Aggancio motore gesture unico
+        LisaGestureEngine.init(this);
+
+        servizioAttivo = true;
+
+        Log.d(TAG, "Servizio accessibilita connesso");
+
+        mostraStatoLisa(false);
+        applicaVisibilitaPallino();
+
+        if (thermalSafetyMonitor == null) {
+            thermalSafetyMonitor =
+                    new ThermalSafetyMonitor(this);
+        }
+
+        thermalSafetyMonitor.start();
+    }
+
+    public static void aggiornaIndicatoreAscolto(
+            boolean ascolto) {
+
+        LisaAccessibilityService servizio = instance;
+
+        if (servizio == null) {
+            return;
+        }
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(() -> servizio.mostraStatoLisa(ascolto));
+    }
+
+
+    public static void aggiornaVisibilitaPallino() {
+        LisaAccessibilityService s = instance;
+        if (s == null) return;
+
+        s.toggleSettingsHandler.post(
+                s::applicaVisibilitaPallino
+        );
+    }
+
+
+    public static void aggiornaTelemetria(
+            String ascoltato,
+            String interpretato,
+            String azione,
+            String risultato
+    ) {
+        LisaAccessibilityService servizio = instance;
+        if (servizio == null) return;
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(() ->
+                servizio.mostraTelemetria(
+                        ascoltato,
+                        interpretato,
+                        azione,
+                        risultato
+                )
+        );
+    }
+
+    public static void nascondiTelemetria() {
+        LisaAccessibilityService servizio = instance;
+        if (servizio == null) return;
+
+        if (servizio.diagnosiAutohideHandler != null
+                && servizio.diagnosiAutohideRunnable != null) {
+            servizio.diagnosiAutohideHandler.removeCallbacks(
+                    servizio.diagnosiAutohideRunnable
+            );
+            servizio.diagnosiAutohideRunnable = null;
+        }
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(servizio::rimuoviIndicatoreTelemetria);
+    }
+
+    public static void aggiornaVignettaSemplice(String testo) {
+        LisaAccessibilityService servizio = instance;
+        if (servizio == null) return;
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(() -> servizio.mostraVignettaSemplice(testo));
+    }
+
+    public static void nascondiVignettaSemplice() {
+        LisaAccessibilityService servizio = instance;
+        if (servizio == null) return;
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(servizio::rimuoviVignettaSemplice);
+    }
+
+    private android.widget.LinearLayout diagnosiLayout;
+    private android.os.Handler diagnosiAutohideHandler;
+    private Runnable diagnosiAutohideRunnable;
+
+    // Rimozioni overlay indipendenti dalle ViewPropertyAnimator.
+    // Ogni View ha il proprio Runnable per evitare race tra
+    // vignetta semplice e vignetta diagnosi.
+    private final android.os.Handler overlayRemovalHandler =
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()
+            );
+
+    private final java.util.IdentityHashMap<
+            android.view.View,
+            Runnable
+            > overlayRemovalRunnables =
+            new java.util.IdentityHashMap<>();
+
+    public static void resetDiagnosi() {
+        LisaAccessibilityService s = instance;
+        if (s == null) return;
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            if (s.diagnosiLayout != null) {
+                s.diagnosiLayout.removeAllViews();
+            }
+        });
+    }
+
+    public static void aggiungiRigaDiagnosi(String fase, String dettaglio) {
+        aggiungiRigaDiagnosi(
+                fase,
+                dettaglio,
+                -1
+        );
+    }
+
+    public static void aggiungiRigaDiagnosi(
+            String fase,
+            String dettaglio,
+            int timeoutMs) {
+
+        LisaAccessibilityService s = instance;
+        if (s == null) return;
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).post(() -> {
+
+            if (!s.getSharedPreferences(
+                    "lisa_ui",
+                    android.content.Context.MODE_PRIVATE
+            ).getBoolean(
+                    "telemetria_diagnosi_attiva",
+                    false
+            )) return;
+
+            s.ripristinaAnimazioneOverlay(
+                    s.indicatoreTelemetria
+            );
+
+            if (s.diagnosiLayout == null) {
+                s.mostraTelemetria(
+                        null,
+                        null,
+                        null,
+                        null
+                );
+                if (s.diagnosiLayout == null) return;
+            }
+
+            android.widget.TextView tv =
+                    s.creaRigaTelemetria(
+                            fase + " " + dettaglio
+                    );
+
+            s.diagnosiLayout.addView(tv);
+
+            if (s.diagnosiAutohideHandler == null) {
+                s.diagnosiAutohideHandler =
+                        new android.os.Handler(
+                                android.os.Looper.getMainLooper()
+                        );
+            }
+
+            if (s.diagnosiAutohideRunnable != null) {
+                s.diagnosiAutohideHandler.removeCallbacks(
+                        s.diagnosiAutohideRunnable
+                );
+            }
+
+            int delayMs =
+                    timeoutMs > 0
+                            ? timeoutMs
+                            : s.getSharedPreferences(
+                                    "lisa_ui",
+                                    MODE_PRIVATE
+                            ).getInt(
+                                    "diagnosi_autohide_ms",
+                                    5000
+                            );
+
+            s.diagnosiAutohideRunnable =
+                    LisaAccessibilityService::nascondiTelemetria;
+
+            s.diagnosiAutohideHandler.postDelayed(
+                    s.diagnosiAutohideRunnable,
+                    delayMs
+            );
+
+            android.util.Log.i(
+                    TAG,
+                    "DIAGNOSI LISA: " + fase + " " + dettaglio
+            );
+        });
+    }
+
+    private void ripristinaAnimazioneOverlay(
+            android.view.View view) {
+
+        if (view == null) return;
+
+        // Annulla soltanto la chiusura pendente
+        // appartenente a questa stessa View.
+        Runnable pendente =
+                overlayRemovalRunnables.remove(view);
+
+        if (pendente != null) {
+            overlayRemovalHandler.removeCallbacks(
+                    pendente
+            );
+        }
+
+        view.animate().cancel();
+
+        view.setLayerType(
+                android.view.View.LAYER_TYPE_NONE,
+                null
+        );
+
+        view.setAlpha(1f);
+        view.setScaleX(1f);
+        view.setScaleY(1f);
+        view.setTranslationY(0f);
+
+        // Nessun nuovo addView:
+        // la View è ancora attached alla WindowManager.
+        view.setVisibility(
+                android.view.View.VISIBLE
+        );
+    }
+
+    private void animaERimuoviOverlay(
+            android.view.View view,
+            android.view.WindowManager windowManager,
+            Runnable alTermine) {
+
+        if (view == null) {
+            if (alTermine != null) {
+                alTermine.run();
+            }
+            return;
+        }
+
+        Runnable precedente =
+                overlayRemovalRunnables.remove(view);
+
+        if (precedente != null) {
+            overlayRemovalHandler.removeCallbacks(
+                    precedente
+            );
+        }
+
+        view.animate().cancel();
+
+        view.setVisibility(
+                android.view.View.VISIBLE
+        );
+        view.setLayerType(
+                android.view.View.LAYER_TYPE_NONE,
+                null
+        );
+        view.setAlpha(1f);
+        view.setScaleX(1f);
+        view.setScaleY(1f);
+        view.setTranslationY(0f);
+
+        final android.view.View vistaFinale = view;
+
+        Runnable nascondi = () -> {
+
+            overlayRemovalRunnables.remove(
+                    vistaFinale
+            );
+
+            vistaFinale.animate().cancel();
+
+            vistaFinale.setLayerType(
+                    android.view.View.LAYER_TYPE_NONE,
+                    null
+            );
+
+            // FONDAMENTALE:
+            // durante l'uso normale MAI removeView.
+            vistaFinale.setVisibility(
+                    android.view.View.GONE
+            );
+
+            // Stato grafico pronto per la prossima apertura.
+            vistaFinale.setAlpha(1f);
+            vistaFinale.setScaleX(1f);
+            vistaFinale.setScaleY(1f);
+            vistaFinale.setTranslationY(0f);
+
+            if (alTermine != null) {
+                alTermine.run();
+            }
+        };
+
+        overlayRemovalRunnables.put(
+                vistaFinale,
+                nascondi
+        );
+
+        // Shrink proporzionale: nessuno schiacciamento a linea.
+        vistaFinale.animate()
+                .withLayer()
+                .alpha(0f)
+                .scaleX(0.15f)
+                .scaleY(0.15f)
+                .setDuration(220L)
+                .setInterpolator(
+                        new android.view.animation.AccelerateInterpolator()
+                )
+                .start();
+
+        // Lifecycle indipendente da ViewPropertyAnimator.
+        overlayRemovalHandler.postDelayed(
+                nascondi,
+                260L
+        );
+    }
+
+    private int dp(int valore) {
+        return Math.round(
+                valore * getResources().getDisplayMetrics().density
+        );
+    }
+
+
+    private android.graphics.drawable.GradientDrawable creaBollaLisa(
+            boolean ascolto) {
+
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable();
+
+        d.setShape(
+                android.graphics.drawable.GradientDrawable.OVAL
+        );
+
+        d.setColor(
+                ascolto
+                        ? android.graphics.Color.rgb(255, 145, 0)
+                        : android.graphics.Color.rgb(35, 200, 80)
+        );
+
+        d.setStroke(
+                dp(2),
+                android.graphics.Color.WHITE
+        );
+
+        return d;
+    }
+
+
+    private android.widget.TextView creaRigaTelemetria(String testo) {
+        android.widget.TextView tv =
+                new android.widget.TextView(this);
+
+        tv.setText(testo);
+        tv.setTextSize(15);
+        tv.setTextColor(android.graphics.Color.WHITE);
+        tv.setPadding(
+                dp(14),
+                dp(8),
+                dp(14),
+                dp(8)
+        );
+        tv.setSingleLine(false);
+
+        return tv;
+    }
+
+    private android.graphics.drawable.GradientDrawable creaSfondoTelemetria() {
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+
+        bg.setColor(0xCC202020);
+        bg.setCornerRadius(dp(20));
+        // Bordo bianco rimosso: test artefatto riga residua.
+
+        return bg;
+    }
+
+    private void mostraTelemetria(
+            String ascoltato,
+            String interpretato,
+            String azione,
+            String risultato
+    ) {
+        if (!getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                .getBoolean("telemetria_diagnosi_attiva", false)) return; // vignetta diagnosi DISATTIVATA in Fase 1.2
+
+        if (telemetriaWindowManager == null) {
+            telemetriaWindowManager =
+                    (android.view.WindowManager)
+                            getSystemService(
+                                    android.content.Context.WINDOW_SERVICE
+                            );
+        }
+
+        if (telemetriaWindowManager == null) return;
+
+        if (indicatoreTelemetria == null) {
+            diagnosiLayout =
+                    new android.widget.LinearLayout(this);
+
+            diagnosiLayout.setOrientation(
+                    android.widget.LinearLayout.VERTICAL
+            );
+
+            diagnosiLayout.setPadding(
+                    dp(2),
+                    dp(2),
+                    dp(2),
+                    dp(2)
+            );
+
+            diagnosiLayout.setBackground(
+                    creaSfondoTelemetria()
+            );
+
+            indicatoreTelemetria = diagnosiLayout;
+
+            indicatoreTelemetriaLp =
+                    new android.view.WindowManager.LayoutParams(
+                            dp(300),
+                            android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                            android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                    | android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                            android.graphics.PixelFormat.TRANSLUCENT
+                    );
+
+            indicatoreTelemetriaLp.gravity =
+                    android.view.Gravity.TOP
+                            | android.view.Gravity.START;
+
+            android.content.SharedPreferences prefs =
+                    getSharedPreferences(
+                            "lisa_ui",
+                            MODE_PRIVATE
+                    );
+
+            indicatoreTelemetriaLp.x =
+                    prefs.getInt(
+                            "telemetria_x",
+                            dp(25)
+                    );
+
+            indicatoreTelemetriaLp.y =
+                    prefs.getInt(
+                            "telemetria_y",
+                            dp(220)
+                    );
+
+            telemetriaWindowManager.addView(
+                    indicatoreTelemetria,
+                    indicatoreTelemetriaLp
+            );
+
+            final int[] initX = { indicatoreTelemetriaLp.x };
+            final int[] initY = { indicatoreTelemetriaLp.y };
+            final float[] touchX = { 0f };
+            final float[] touchY = { 0f };
+
+            indicatoreTelemetria.setOnTouchListener(
+                    (v, event) -> {
+                        switch (event.getActionMasked()) {
+
+                            case android.view.MotionEvent.ACTION_DOWN:
+                                initX[0] = indicatoreTelemetriaLp.x;
+                                initY[0] = indicatoreTelemetriaLp.y;
+                                touchX[0] = event.getRawX();
+                                touchY[0] = event.getRawY();
+                                return true;
+
+                            case android.view.MotionEvent.ACTION_MOVE:
+                                indicatoreTelemetriaLp.x =
+                                        initX[0]
+                                                + (int) (event.getRawX() - touchX[0]);
+
+                                indicatoreTelemetriaLp.y =
+                                        initY[0]
+                                                + (int) (event.getRawY() - touchY[0]);
+
+                                telemetriaWindowManager.updateViewLayout(
+                                        indicatoreTelemetria,
+                                        indicatoreTelemetriaLp
+                                );
+                                return true;
+
+                            case android.view.MotionEvent.ACTION_UP:
+                            case android.view.MotionEvent.ACTION_CANCEL:
+                                getSharedPreferences(
+                                        "lisa_ui",
+                                        MODE_PRIVATE
+                                )
+                                        .edit()
+                                        .putInt(
+                                                "telemetria_x",
+                                                indicatoreTelemetriaLp.x
+                                        )
+                                        .putInt(
+                                                "telemetria_y",
+                                                indicatoreTelemetriaLp.y
+                                        )
+                                        .apply();
+                                return true;
+                        }
+
+                        return false;
+                    }
+            );
+
+            android.util.Log.i(
+                    TAG,
+                    "TELEMETRIA LISA AGGIUNTA"
+            );
+        }
+
+
+
+        if (diagnosiLayout != null) {
+            diagnosiLayout.setBackground(
+                    creaSfondoTelemetria()
+            );
+        }
+
+        ripristinaAnimazioneOverlay(
+                indicatoreTelemetria
+        );
+
+        if (ascoltato != null) {
+            aggiungiRigaDiagnosi(
+                    "🎤",
+                    "Ascoltato: " + ascoltato
+            );
+        }
+
+        if (interpretato != null) {
+            aggiungiRigaDiagnosi(
+                    "🧠",
+                    "Interpretato: " + interpretato
+            );
+        }
+
+        if (azione != null) {
+            aggiungiRigaDiagnosi(
+                    "⚙️",
+                    "Azione: " + azione
+            );
+        }
+
+        if (risultato != null) {
+            aggiungiRigaDiagnosi(
+                    "✅",
+                    "Risultato: " + risultato
+            );
+        }
+    }
+
+    private void mostraVignettaSemplice(String testo) {
+        if (!getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                .getBoolean("vignetta_semplice_attiva", true)) return;
+
+        try {
+            if (sempliceWindowManager == null) {
+                sempliceWindowManager =
+                        (android.view.WindowManager)
+                                getSystemService(
+                                        android.content.Context.WINDOW_SERVICE
+                                );
+            }
+
+            if (sempliceWindowManager == null) return;
+
+            if (indicatoreSemplice == null) {
+                indicatoreSemplice =
+                        new android.widget.TextView(this);
+
+                indicatoreSemplice.setTextSize(15);
+                indicatoreSemplice.setTextColor(
+                        android.graphics.Color.WHITE
+                );
+                indicatoreSemplice.setPadding(
+                        dp(14),
+                        dp(8),
+                        dp(14),
+                        dp(8)
+                );
+                indicatoreSemplice.setSingleLine(true);
+
+                android.graphics.drawable.GradientDrawable bg =
+                        new android.graphics.drawable.GradientDrawable();
+                bg.setColor(0xCC202020);
+                bg.setCornerRadius(dp(20));
+                // Bordo bianco rimosso: test artefatto riga residua.
+                indicatoreSemplice.setBackground(bg);
+
+                indicatoreSempliceLp =
+                        new android.view.WindowManager.LayoutParams(
+                                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                                android.view.WindowManager.LayoutParams.WRAP_CONTENT,
+                                android.view.WindowManager.LayoutParams
+                                        .TYPE_ACCESSIBILITY_OVERLAY,
+                                android.view.WindowManager.LayoutParams
+                                        .FLAG_NOT_FOCUSABLE
+                                        | android.view.WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCH_MODAL
+                                        | android.view.WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_IN_SCREEN
+                                        | android.view.WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCHABLE,
+                                android.graphics.PixelFormat.TRANSLUCENT
+                        );
+
+                indicatoreSempliceLp.gravity =
+                        android.view.Gravity.TOP
+                                | android.view.Gravity.CENTER_HORIZONTAL;
+
+                android.content.SharedPreferences prefs =
+                        getSharedPreferences(
+                                "lisa_ui",
+                                MODE_PRIVATE
+                        );
+
+                indicatoreSempliceLp.y = dp(60);
+
+
+                sempliceWindowManager.addView(
+                        indicatoreSemplice,
+                        indicatoreSempliceLp
+                );
+
+                android.util.Log.i(
+                        TAG,
+                        "VIGNETTA SEMPLICE AGGIUNTA"
+                );
+            }
+
+            ripristinaAnimazioneOverlay(
+                    indicatoreSemplice
+            );
+
+            if (testo != null) {
+                indicatoreSemplice.setText(testo);
+            }
+
+            if (sempliceAutohideRunnable != null) {
+                new android.os.Handler(
+                        android.os.Looper.getMainLooper()
+                ).removeCallbacks(sempliceAutohideRunnable);
+            }
+
+            sempliceAutohideRunnable =
+                    this::rimuoviVignettaSemplice;
+
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()
+            ).postDelayed(
+                    sempliceAutohideRunnable,
+                    2500L
+            );
+
+        } catch (Throwable e) {
+            android.util.Log.e(
+                    TAG,
+                    "ERRORE VIGNETTA SEMPLICE",
+                    e
+            );
+        }
+    }
+
+    private void rimuoviVignettaSemplice() {
+
+        if (sempliceAutohideRunnable != null) {
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()
+            ).removeCallbacks(
+                    sempliceAutohideRunnable
+            );
+            sempliceAutohideRunnable = null;
+        }
+
+        if (indicatoreSemplice == null) {
+            return;
+        }
+
+        animaERimuoviOverlay(
+                indicatoreSemplice,
+                sempliceWindowManager,
+                () -> android.util.Log.i(
+                        TAG,
+                        "VIGNETTA SEMPLICE NASCOSTA"
+                )
+        );
+    }
+
+    private void rimuoviIndicatoreTelemetria() {
+
+        if (indicatoreTelemetria == null) {
+            return;
+        }
+
+        animaERimuoviOverlay(
+                indicatoreTelemetria,
+                telemetriaWindowManager,
+                () -> {
+
+                    if (diagnosiLayout != null) {
+                        diagnosiLayout.removeAllViews();
+                        diagnosiLayout.setBackground(null);
+                    }
+
+                    // TEST: detach reale solo della vignetta diagnosi.
+                    if (indicatoreTelemetria != null
+                            && telemetriaWindowManager != null) {
+                        try {
+                            telemetriaWindowManager.removeView(
+                                    indicatoreTelemetria
+                            );
+                        } catch (Exception ignored) {
+                        }
+                    }
+
+                    indicatoreTelemetria = null;
+                    diagnosiLayout = null;
+
+                    android.util.Log.i(
+                            TAG,
+                            "TELEMETRIA LISA NASCOSTA (detach)"
+                    );
+                }
+        );
+    }
+
+    private void applicaVisibilitaPallino() {
+        boolean attivo =
+                getSharedPreferences(
+                        "lisa_ui",
+                        MODE_PRIVATE
+                ).getBoolean(
+                        "pallino_attivo",
+                        true
+                );
+
+        if (attivo) {
+            mostraStatoLisa(indicatoreAscolto);
+        } else {
+            rimuoviIndicatoreLisa();
+        }
+    }
+
+    private void mostraStatoLisa(boolean ascolto) {
+
+        indicatoreAscolto = ascolto;
+
+        boolean pallinoAttivo =
+                getSharedPreferences(
+                        "lisa_ui",
+                        MODE_PRIVATE
+                ).getBoolean(
+                        "pallino_attivo",
+                        true
+                );
+
+        if (!pallinoAttivo) {
+            rimuoviIndicatoreLisa();
+            return;
+        }
+
+        try {
+
+            if (indicatoreWindowManager == null) {
+
+                indicatoreWindowManager =
+                        (android.view.WindowManager)
+                                getSystemService(
+                                        android.content.Context.WINDOW_SERVICE
+                                );
+            }
+
+            if (indicatoreWindowManager == null) {
+                return;
+            }
+
+            if (indicatoreLisa == null) {
+
+                indicatoreLisa =
+                        new android.view.View(this);
+                indicatoreLisa.setClickable(true);
+                indicatoreLisa.setFocusable(true);
+                indicatoreLisa.setContentDescription("Pallino Lisa");
+                indicatoreLisa.setImportantForAccessibility(
+                        android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+                indicatoreLisa.setOnClickListener(v -> {});
+
+                indicatoreLp =
+                        new android.view.WindowManager.LayoutParams(
+                                dp(42),
+                                dp(42),
+                                android.view.WindowManager.LayoutParams
+                                        .TYPE_ACCESSIBILITY_OVERLAY,
+                                android.view.WindowManager.LayoutParams
+                                        .FLAG_NOT_FOCUSABLE
+                                        | android.view.WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCH_MODAL
+                                        | android.view.WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_IN_SCREEN,
+                                android.graphics.PixelFormat.TRANSLUCENT
+                        );
+
+                indicatoreLp.gravity =
+                        android.view.Gravity.TOP
+                                | android.view.Gravity.START;
+
+                android.content.SharedPreferences prefs =
+                        getSharedPreferences(
+                                "lisa_ui",
+                                MODE_PRIVATE
+                        );
+
+                indicatoreLp.x =
+                        prefs.getInt(
+                                "indicatore_x",
+                                dp(25)
+                        );
+
+                indicatoreLp.y =
+                        prefs.getInt(
+                                "indicatore_y",
+                                dp(160)
+                        );
+
+
+                final float[] downX = new float[1];
+                final float[] downY = new float[1];
+                final int[] startX = new int[1];
+                final int[] startY = new int[1];
+                final boolean[] trascinato = new boolean[1];
+
+
+                indicatoreLisa.setOnTouchListener(
+                        (v, event) -> {
+
+                            switch (event.getActionMasked()) {
+
+                                case android.view.MotionEvent.ACTION_DOWN:
+
+                                    downX[0] = event.getRawX();
+                                    downY[0] = event.getRawY();
+
+                                    startX[0] = indicatoreLp.x;
+                                    startY[0] = indicatoreLp.y;
+
+                                    trascinato[0] = false;
+
+                                    return true;
+
+
+                                case android.view.MotionEvent.ACTION_MOVE:
+
+                                    float dx =
+                                            event.getRawX()
+                                                    - downX[0];
+
+                                    float dy =
+                                            event.getRawY()
+                                                    - downY[0];
+
+                                    if (Math.abs(dx) > dp(6)
+                                            || Math.abs(dy) > dp(6)) {
+
+                                        trascinato[0] = true;
+                                    }
+
+                                    indicatoreLp.x =
+                                            startX[0]
+                                                    + Math.round(dx);
+
+                                    indicatoreLp.y =
+                                            startY[0]
+                                                    + Math.round(dy);
+
+                                    android.util.DisplayMetrics dm =
+                                            getResources()
+                                                    .getDisplayMetrics();
+
+                                    indicatoreLp.x =
+                                            Math.max(
+                                                    0,
+                                                    Math.min(
+                                                            indicatoreLp.x,
+                                                            dm.widthPixels
+                                                                    - dp(42)
+                                                    )
+                                            );
+
+                                    indicatoreLp.y =
+                                            Math.max(
+                                                    0,
+                                                    Math.min(
+                                                            indicatoreLp.y,
+                                                            dm.heightPixels
+                                                                    - dp(42)
+                                                    )
+                                            );
+
+                                    try {
+
+                                        indicatoreWindowManager
+                                                .updateViewLayout(
+                                                        indicatoreLisa,
+                                                        indicatoreLp
+                                                );
+
+                                    } catch (Exception ignored) {
+                                    }
+
+                                    return true;
+
+
+                                case android.view.MotionEvent.ACTION_UP:
+
+                                    prefs.edit()
+                                            .putInt(
+                                                    "indicatore_x",
+                                                    indicatoreLp.x
+                                            )
+                                            .putInt(
+                                                    "indicatore_y",
+                                                    indicatoreLp.y
+                                            )
+                                            .apply();
+
+                                    if (!trascinato[0]) {
+
+                                        try {
+
+                                            android.content.Intent i =
+                                                    new android.content.Intent(
+                                                            this,
+                                                            MainActivity.class
+                                                    );
+
+                                            i.addFlags(
+                                                    android.content.Intent
+                                                            .FLAG_ACTIVITY_NEW_TASK
+                                                            | android.content.Intent
+                                                            .FLAG_ACTIVITY_SINGLE_TOP
+                                            );
+
+                                            startActivity(i);
+
+                                            Log.i(
+                                                    TAG,
+                                                    "BOLLA LISA: apertura pannello Lisa"
+                                            );
+
+                                        } catch (Exception e) {
+
+                                            Log.e(
+                                                    TAG,
+                                                    "Errore apertura Lisa dalla bolla",
+                                                    e
+                                            );
+                                        }
+                                    }
+
+                                    return true;
+                            }
+
+                            return false;
+                        }
+                );
+
+
+                indicatoreWindowManager.addView(
+                        indicatoreLisa,
+                        indicatoreLp
+                );
+
+                Log.i(
+                        TAG,
+                        "BOLLA LISA AGGIUNTA"
+                );
+            }
+
+
+            indicatoreLisa.setBackground(
+                    creaBollaLisa(ascolto)
+            );
+
+            Log.i(
+                    TAG,
+                    "BOLLA LISA: "
+                            + (
+                                ascolto
+                                        ? "ARANCIONE - ASCOLTO"
+                                        : "VERDE - RIPOSO"
+                            )
+            );
+
+
+        } catch (Throwable e) {
+
+            Log.e(
+                    TAG,
+                    "ERRORE BOLLA LISA",
+                    e
+            );
+        }
+    }
+
+
+    private void rimuoviIndicatoreLisa() {
+
+        if (indicatoreLisa != null
+                && indicatoreWindowManager != null) {
+
+            try {
+
+                indicatoreWindowManager.removeView(
+                        indicatoreLisa
+                );
+
+            } catch (Exception ignored) {
+            }
+        }
+
+        indicatoreLisa = null;
+        indicatoreLp = null;
+        indicatoreWindowManager = null;
+    }
+
+
+    private boolean targetHaTestoVisibile(
+            AccessibilityNodeInfo root,
+            AccessibilityNodeInfo nodo,
+            int livello) {
+        if (nodo == null || livello > 3) return false;
+        if (nodo != root && nodoAzzionabile(nodo)) return false;
+        if (nodo.isVisibleToUser()) {
+            CharSequence t = nodo.getText();
+            if (t != null && !t.toString().trim().isEmpty())
+                return true;
+        }
+        int figli = Math.min(nodo.getChildCount(), 20);
+        for (int i = 0; i < figli; i++) {
+            AccessibilityNodeInfo f = nodo.getChild(i);
+            if (f != null
+                    && targetHaTestoVisibile(root, f, livello + 1))
+                return true;
+        }
+        return false;
+    }
+
+    private boolean targetHaTestoVisibile(AccessibilityNodeInfo azione) {
+        return targetHaTestoVisibile(azione, azione, 0);
+    }
+
+    private static final java.util.Set<String> ETICHETTE_WHITELIST =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "indietro","back","home","menu",
+                    "persona","account","utente","profilo",
+                    "altoparlante","speaker","audio","volume",
+                    "microfono","mic","microfoni",
+                    "impostazioni","settings",
+                    "cerca","ricerca","search",
+                    "chat","messaggi","notifiche",
+                    "chiudi","close","piu","altro","more",
+                    "play","pausa","riproduci",
+                    "preferiti","salva","aggiungi",
+                    "elimina","cancella","delete",
+                    "modifica","edit","condividi","share",
+                    "aggiorna","refresh","download","scarica",
+                    "recenti","panoramica","overview","applicazioni",
+                    "attivita","attività","task","schede",
+                    "pulsanti","navigazione"
+            ));
+
+    private static String normalizzaEtichetta(String x) {
+        if (x == null) return "";
+        return x.replaceAll("[/_\\-]+"," ")
+                .replaceAll("\\s+"," ").trim();
+    }
+
+    private static String chiaveEtichetta(String x) {
+        return normalizzaEtichetta(x)
+                .toLowerCase(java.util.Locale.ITALIAN);
+    }
+
+    private static String calcolaEtichettaSmart(
+            AccessibilityNodeInfo azione) {
+        if (azione == null) return "";
+        if (azione.getChildCount() != 0) return "";
+        CharSequence cd = azione.getContentDescription();
+        if (cd == null) return "";
+        String x = cd.toString().replaceAll("\\s+"," ").trim();
+        if (x.isEmpty() || x.length() > 30) return "";
+        String[] parole = x.toLowerCase(java.util.Locale.ITALIAN)
+                .split(" ");
+        for (String w : parole) {
+            if (ETICHETTE_WHITELIST.contains(w)) return x;
+        }
+        return "";
+    }
+
+    public static final class NodoCliccabile {
+        public int indice;
+        public final int x;
+        public final int y;
+        public final String testo;
+        public final String etichettaSmart;
+        public final boolean haTestoVisibile;
+        public int numeroVisibile = 0;
+        public final AccessibilityNodeInfo nodo;
+        private final android.graphics.Rect bounds;
+        public final android.graphics.Rect boundsWindow;
+
+        NodoCliccabile(int x, int y, String testo,
+                       String etichettaSmart,
+                       boolean haTestoVisibile,
+                       AccessibilityNodeInfo nodo,
+                       android.graphics.Rect bounds,
+                       android.graphics.Rect boundsWindow) {
+            this.x=x; this.y=y; this.testo=testo;
+            this.etichettaSmart=etichettaSmart;
+            this.haTestoVisibile=haTestoVisibile;
+            this.nodo=nodo;
+            this.bounds=bounds;
+            this.boundsWindow=boundsWindow;
+        }
+    }
+
+    public java.util.List<NodoCliccabile> enumeraNodiCliccabili() {
+        java.util.List<NodoCliccabile> trovati=new java.util.ArrayList<>();
+        java.util.List<android.view.accessibility.AccessibilityWindowInfo> ws=
+                getWindows();
+
+        if (ws!=null && !ws.isEmpty()) {
+
+            for (android.view.accessibility.AccessibilityWindowInfo w:ws) {
+                if (w==null) continue;
+                android.graphics.Rect wb=new android.graphics.Rect();
+                w.getBoundsInScreen(wb);
+                AccessibilityNodeInfo wr=w.getRoot();
+                String wpkg=wr==null || wr.getPackageName()==null
+                        ? "" : wr.getPackageName().toString();
+                Log.i(TAG,"FINESTRA type="+w.getType()
+                        +" layer="+w.getLayer()
+                        +" pkg="+wpkg
+                        +" bounds="+wb);
+            }
+
+            java.util.List<android.view.accessibility.AccessibilityWindowInfo> app=
+                    new java.util.ArrayList<>();
+
+            for (android.view.accessibility.AccessibilityWindowInfo w:ws) {
+                if (w==null) continue;
+
+                int tipo=w.getType();
+                boolean ammessa=
+                        tipo==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+                        || tipo==android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                        || tipo==android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM
+                        || tipo==android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY;
+
+                if (!ammessa) continue;
+
+                AccessibilityNodeInfo root=w.getRoot();
+                if (root==null) continue;
+
+                CharSequence desc=root.getContentDescription();
+                if (desc!=null
+                        && desc.toString().startsWith("lisa_overlay_"))
+                    continue;
+
+                app.add(w);
+            }
+
+            app.sort((a,b) -> {
+                android.graphics.Rect ra=new android.graphics.Rect();
+                android.graphics.Rect rb=new android.graphics.Rect();
+                a.getBoundsInScreen(ra);
+                b.getBoundsInScreen(rb);
+                int x=Integer.compare(ra.left,rb.left);
+                return x!=0 ? x : Integer.compare(ra.top,rb.top);
+            });
+
+            for (android.view.accessibility.AccessibilityWindowInfo w:app) {
+                AccessibilityNodeInfo root=w.getRoot();
+                if (root==null) continue;
+
+                java.util.List<NodoCliccabile> locale=new java.util.ArrayList<>();
+                esploraNodi(root,locale,new java.util.HashSet<>());
+
+                final int banda=Math.max(1,dp(60));
+                locale.sort((a,b) -> {
+                    int ba=a.y/banda, bb=b.y/banda;
+                    if (ba!=bb) return Integer.compare(ba,bb);
+                    return Integer.compare(a.x,b.x);
+                });
+
+                trovati.addAll(locale);
+            }
+        } else {
+            AccessibilityNodeInfo root=getRootInActiveWindow();
+            if (root!=null)
+                esploraNodi(root,trovati,new java.util.HashSet<>());
+        }
+
+        long areaSchermo=0;
+        for (NodoCliccabile t:trovati) {
+            long at=(long)t.bounds.width()*t.bounds.height();
+            if (at>areaSchermo) areaSchermo=at;
+        }
+
+        java.util.List<NodoCliccabile> filtrati=new java.util.ArrayList<>();
+
+        for (NodoCliccabile a:trovati) {
+            boolean coperto=false;
+            long areaA=(long)a.bounds.width()*a.bounds.height();
+
+            for (NodoCliccabile b:trovati) {
+                if (a==b) continue;
+                if (a.nodo==null || b.nodo==null) continue;
+                if (a.nodo.getWindowId()!=b.nodo.getWindowId()) continue;
+                long areaB=(long)b.bounds.width()*b.bounds.height();
+                if (areaB < areaA*3L) continue;
+                if (areaSchermo>0 && areaB >= areaSchermo*85L/100L) continue;
+                if (b.nodo==null || !nodoAzzionabile(b.nodo)) continue;
+                if (b.testo==null || b.testo.trim().isEmpty()) continue;
+                if (nodoAntenatoDi(b.nodo,a.nodo)) continue;
+
+                android.graphics.Rect inter=new android.graphics.Rect(a.bounds);
+                if (inter.intersect(b.bounds)) {
+                    long areaI=(long)inter.width()*inter.height();
+                    if (areaA>0 && areaI/(double)areaA>0.80) {
+                        String clsA=a.nodo==null?"?":String.valueOf(a.nodo.getClassName());
+                        String pkgA=a.nodo==null||a.nodo.getPackageName()==null?"?":a.nodo.getPackageName().toString();
+                        String clsB=b.nodo==null?"?":String.valueOf(b.nodo.getClassName());
+                        String pkgB=b.nodo==null||b.nodo.getPackageName()==null?"?":b.nodo.getPackageName().toString();
+                        boolean clickB=b.nodo!=null && b.nodo.isClickable();
+                        Log.i(TAG,"COPRE_DETTAGLIO"
+                                +" a_txt="+a.testo
+                                +" a_cls="+clsA
+                                +" a_pkg="+pkgA
+                                +" a_b="+a.bounds
+                                +" b_txt="+b.testo
+                                +" b_cls="+clsB
+                                +" b_pkg="+pkgB
+                                +" b_click="+clickB
+                                +" b_b="+b.bounds
+                                +" ratio="+(areaI/(double)areaA));
+                        coperto=true; break;
+                    }
+                }
+            }
+            if (!coperto) filtrati.add(a);
+        }
+
+        final int bandaGlobale=Math.max(1,dp(60));
+        filtrati.sort((a,b) -> {
+            int ba=a.y/bandaGlobale, bb=b.y/bandaGlobale;
+            if (ba!=bb) return Integer.compare(ba,bb);
+            int cx=Integer.compare(a.x,b.x);
+            return cx!=0 ? cx : Integer.compare(a.y,b.y);
+        });
+
+        if (filtrati.size()>99)
+            filtrati=new java.util.ArrayList<>(filtrati.subList(0,99));
+
+        for (int i=0;i<filtrati.size();i++)
+            filtrati.get(i).indice=i+1;
+
+        Log.i(TAG,"VOICE_ACCESS_ENUM count="+filtrati.size());
+        for (int i=0;i<Math.min(200,filtrati.size());i++) {
+            NodoCliccabile n=filtrati.get(i);
+            Log.i(TAG,"VOICE_ACCESS_ENUM #"+n.indice+
+                    " ["+n.x+","+n.y+"] "+n.testo);
+        }
+        return filtrati;
+    }
+
+    public static boolean numeriAttivi() {
+        LisaAccessibilityService s=instance;
+        return s!=null
+                && s.grigliaVisibile
+                && s.grigliaModalita==ModalitaOverlay.NUMERI;
+    }
+
+    public static boolean overlayAttivo() {
+        LisaAccessibilityService s=instance;
+        return s!=null && s.grigliaVisibile && s.grigliaModalita!=null;
+    }
+
+    public static boolean nascondiOverlaySeAttivo() {
+        LisaAccessibilityService s=instance;
+        if (s==null) return false;
+
+        boolean attivo =
+                s.grigliaVisibile
+                || s.grigliaRiapriDopoTap;
+
+        // Deve passare sempre da nascondiOverlay():
+        // cosi annulla anche un timeout di riapertura pendente.
+        new android.os.Handler(android.os.Looper.getMainLooper())
+                .post(s::nascondiOverlay);
+
+        return attivo;
+    }
+
+    public static boolean cliccaNumero(int n) {
+        LisaAccessibilityService s=instance;
+        if (s==null || !s.grigliaVisibile
+                || s.grigliaModalita!=ModalitaOverlay.NUMERI
+                || s.ultimaListaNumeri==null) {
+            Log.i(TAG,"CLICCA_NUM overlay_non_attivo n="+n);
+            return false;
+        }
+        int modo=s.getSharedPreferences("lisa_ui",
+                android.content.Context.MODE_PRIVATE)
+                .getInt("overlay_modo", 0);
+        NodoCliccabile target=null;
+        if (modo==1) {
+            for (NodoCliccabile x:s.ultimaListaNumeri)
+                if (x.numeroVisibile==n) { target=x; break; }
+        } else {
+            for (NodoCliccabile x:s.ultimaListaNumeri)
+                if (x.indice==n) { target=x; break; }
+        }
+        if (target==null) {
+            Log.i(TAG,"CLICCA_NUM fuori_range n="+n);
+            return false;
+        }
+        if (target.nodo==null) {
+            Log.i(TAG,"CLICCA_NUM nodo_null n="+n);
+            return false;
+        }
+        try {
+            if (!target.nodo.refresh()) {
+                Log.i(TAG,"CLICCA_NUM refresh_false n="+n);
+                return false;
+            }
+        } catch (Throwable e) {
+            Log.i(TAG,"CLICCA_NUM refresh_throw n="+n);
+            return false;
+        }
+        android.graphics.Rect now=new android.graphics.Rect();
+        target.nodo.getBoundsInScreen(now);
+        if (!now.equals(target.bounds)) {
+            Log.i(TAG,"CLICCA_NUM stale n="+n
+                    +" old="+target.bounds+" now="+now);
+            return false;
+        }
+        boolean ok=false;
+        try {
+            ok=target.nodo.performAction(
+                    AccessibilityNodeInfo.ACTION_CLICK);
+        } catch (Throwable e) {
+            Log.e(TAG,"CLICCA_NUM action_fail",e);
+        }
+        if (!ok) {
+            android.graphics.Path p=new android.graphics.Path();
+            p.moveTo(target.x,target.y);
+            android.accessibilityservice.GestureDescription gd=
+                    new android.accessibilityservice.GestureDescription.Builder()
+                    .addStroke(new android.accessibilityservice
+                            .GestureDescription
+                            .StrokeDescription(p,0L,50L))
+                    .build();
+            ok=s.dispatchGesture(gd,null,null);
+        }
+        Log.i(TAG,"CLICCA_NUM n="+n+" ok="+ok+" txt="+target.testo);
+        return ok;
+    }
+
+    public static boolean cliccaEtichetta(String etichetta) {
+        LisaAccessibilityService s=instance;
+        if (s==null || !s.grigliaVisibile
+                || s.grigliaModalita!=ModalitaOverlay.NUMERI
+                || s.ultimaListaNumeri==null) {
+            Log.i(TAG,"CLICCA_ETI overlay_non_attivo");
+            return false;
+        }
+        String target=chiaveEtichetta(etichetta);
+        if (target.isEmpty()) return false;
+        NodoCliccabile trovato=null;
+        int count=0;
+        for (NodoCliccabile n:s.ultimaListaNumeri) {
+            String sm=n.etichettaSmart;
+            if (sm!=null && !sm.isEmpty()
+                    && chiaveEtichetta(sm).equals(target)) {
+                trovato=n; count++;
+            }
+        }
+        if (count==0) {
+            Log.i(TAG,"CLICCA_ETI non_trovato "+etichetta);
+            return false;
+        }
+        if (count>1) {
+            Log.i(TAG,"CLICCA_ETI ambiguo count="+count);
+            return false;
+        }
+        try {
+            if (!trovato.nodo.refresh()) return false;
+        } catch (Throwable e) { return false; }
+        android.graphics.Rect now=new android.graphics.Rect();
+        trovato.nodo.getBoundsInScreen(now);
+        if (!now.equals(trovato.bounds)) return false;
+        boolean ok=false;
+        try {
+            ok=trovato.nodo.performAction(
+                    AccessibilityNodeInfo.ACTION_CLICK);
+        } catch (Throwable e) {
+            Log.e(TAG,"CLICCA_ETI action_fail",e);
+        }
+        if (!ok) {
+            android.graphics.Path p=new android.graphics.Path();
+            p.moveTo(trovato.x,trovato.y);
+            android.accessibilityservice.GestureDescription gd=
+                    new android.accessibilityservice
+                            .GestureDescription.Builder()
+                    .addStroke(new android.accessibilityservice
+                            .GestureDescription
+                            .StrokeDescription(p,0L,50L))
+                    .build();
+            ok=s.dispatchGesture(gd,null,null);
+        }
+        Log.i(TAG,"CLICCA_ETI "+etichetta+" ok="+ok);
+        return ok;
+    }
+
+    private void logScarto(String motivo, AccessibilityNodeInfo nodo,
+            android.graphics.Rect b) {
+        if (nodo==null) return;
+        android.graphics.Rect r=b==null ? new android.graphics.Rect() : b;
+        if (b==null) nodo.getBoundsInScreen(r);
+        Log.i(TAG,"NODO_SCARTATO:"+motivo
+                +" cls="+nodo.getClassName()
+                +" txt="+nodo.getText()
+                +" desc="+nodo.getContentDescription()
+                +" b="+r);
+    }
+
+    private boolean nodoAzzionabile(AccessibilityNodeInfo n) {
+        if (n==null) return false;
+        if (n.isClickable()) return true;
+
+        java.util.List<AccessibilityNodeInfo.AccessibilityAction> acts=
+                n.getActionList();
+
+        if (acts!=null) {
+            for (AccessibilityNodeInfo.AccessibilityAction a:acts) {
+                if (a!=null
+                        && a.getId()==AccessibilityNodeInfo.ACTION_CLICK)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean nodoAntenatoDi(
+            AccessibilityNodeInfo candidato,
+            AccessibilityNodeInfo nodo) {
+        if (candidato==null || nodo==null) return false;
+
+        AccessibilityNodeInfo p=nodo.getParent();
+        for (int i=0;i<6 && p!=null;i++) {
+            if (candidato.equals(p)) return true;
+            p=p.getParent();
+        }
+        return false;
+    }
+
+    private String primaEtichettaDiscendente(
+            AccessibilityNodeInfo nodo, int livello) {
+        if (nodo==null || livello>3) return "";
+        int figli=Math.min(nodo.getChildCount(),10);
+        for (int i=0;i<figli;i++) {
+            AccessibilityNodeInfo figlio=nodo.getChild(i);
+            if (figlio==null) continue;
+            CharSequence t=figlio.getText();
+            CharSequence d=figlio.getContentDescription();
+            String s=t!=null ? t.toString().trim()
+                    : d!=null ? d.toString().trim() : "";
+            if (!s.isEmpty()) return s;
+            s=primaEtichettaDiscendente(figlio,livello+1);
+            if (!s.isEmpty()) return s;
+        }
+        return "";
+    }
+
+    private void esploraNodi(
+            AccessibilityNodeInfo nodo,
+            java.util.List<NodoCliccabile> out,
+            java.util.Set<String> boundsUsati) {
+
+        if (nodo==null) return;
+
+        {
+            android.graphics.Rect dr=new android.graphics.Rect();
+            nodo.getBoundsInScreen(dr);
+            if (dr.top<440 && dr.left<1130 && dr.bottom>150)
+                Log.i(TAG,"NODO_ENTRA cls="+nodo.getClassName()
+                        +" txt="+nodo.getText()
+                        +" desc="+nodo.getContentDescription()
+                        +" b="+dr
+                        +" click="+nodo.isClickable()
+                        +" focus="+nodo.isFocusable()
+                        +" figli="+nodo.getChildCount());
+        }
+
+        boolean visibile=nodo.isVisibleToUser();
+        if (!visibile) logScarto("non_visibile",nodo,null);
+        if (visibile) {
+            AccessibilityNodeInfo azione=null;
+
+            if (nodoAzzionabile(nodo)) {
+                azione=nodo;
+            } else {
+                AccessibilityNodeInfo parent=nodo.getParent();
+                int livelli=0;
+
+                while (parent!=null && livelli<5) {
+                    if (nodoAzzionabile(parent)) {
+                        azione=parent;
+                        break;
+                    }
+                    parent=parent.getParent();
+                    livelli++;
+                }
+            }
+
+            if (azione==null) logScarto("no_azione",nodo,null);
+            if (azione!=null) {
+                CharSequence pkg=azione.getPackageName();
+                CharSequence txt=nodo.getText();
+                CharSequence desc=nodo.getContentDescription();
+
+                String etichetta=txt!=null ? txt.toString().trim()
+                        : desc!=null ? desc.toString().trim() : "";
+
+                if (etichetta.isEmpty()) {
+                    CharSequence at=azione.getText();
+                    CharSequence ad=azione.getContentDescription();
+                    etichetta=at!=null ? at.toString().trim()
+                            : ad!=null ? ad.toString().trim() : "";
+                }
+
+                if (etichetta.isEmpty())
+                    etichetta=primaEtichettaDiscendente(azione,0);
+
+                android.graphics.Rect r=new android.graphics.Rect();
+                azione.getBoundsInScreen(r);
+
+                android.graphics.Rect rw=new android.graphics.Rect();
+                if (android.os.Build.VERSION.SDK_INT >= 34) {
+                    azione.getBoundsInWindow(rw);
+                } else {
+                    rw.set(r);
+                }
+
+                int minimo=dp(20);
+                String packageNodo=pkg==null?"":pkg.toString();
+
+                if (etichetta.isEmpty())
+                    logScarto("senza_etichetta",azione,r);
+                if (r.left<0 || r.width()<minimo || r.height()<minimo)
+                    logScarto("bounds",azione,r);
+
+                boolean valido=
+                        r.left>=0
+                        && r.width()>=minimo
+                        && r.height()>=minimo;
+
+                String key=r.left+":"+r.top+":"+r.right+":"+r.bottom
+                        +"|"+etichetta;
+
+                if (valido && boundsUsati.contains(key))
+                    logScarto("duplicato",azione,r);
+
+                if (valido && boundsUsati.add(key)) {
+                    boolean haTestoVis=targetHaTestoVisibile(azione);
+                    String smart=haTestoVis
+                            ? "" : calcolaEtichettaSmart(azione);
+                    out.add(new NodoCliccabile(
+                            r.centerX(),r.centerY(),
+                            etichetta.replaceAll("\\s+"," ").trim(),
+                            smart,
+                            haTestoVis,
+                            azione,
+                            new android.graphics.Rect(r),
+                            new android.graphics.Rect(rw)));
+                }
+            }
+        }
+
+        for (int i=0;i<nodo.getChildCount();i++)
+            esploraNodi(nodo.getChild(i),out,boundsUsati);
+    }
+
+
+    public static void resetGrigliaLivello0() {
+        LisaAccessibilityService s=instance;
+        if (s==null) return;
+        s.grigliaHandler.post(() -> {
+            s.grigliaAreaAttiva = null;
+            s.grigliaLivello = 0;
+            s.grigliaRiapriDopoTap = false;
+            s.grigliaTapGen++;
+            s.mostraOverlay(ModalitaOverlay.GRIGLIA);
+            Log.i(TAG,"GRIGLIA_RESET_BACK livello=0");
+        });
+    }
+
+    public static void salvaStatoOverlayCorrente() {
+        LisaAccessibilityService s=instance;
+        String stato="nessuno";
+        if (s!=null && s.grigliaVisibile) {
+            if (s.grigliaModalita==ModalitaOverlay.GRIGLIA) {
+                stato="griglia";
+            } else if (s.grigliaModalita==ModalitaOverlay.NUMERI) {
+                int modo=s.getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                        .getInt("overlay_modo", 0);
+                stato = (modo==1) ? "etichette" : "numeri";
+            }
+        }
+        if (s!=null) {
+            s.getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                    .edit().putString("ultimo_overlay", stato).apply();
+        }
+        Log.i(TAG,"OVERLAY_SALVATO "+stato);
+    }
+
+    public static void eseguiScreenshotConRipristino() {
+        final LisaAccessibilityService s = instance;
+        if (s == null) return;
+        s.grigliaHandler.post(() -> {
+            if (s != instance) return;
+            salvaStatoOverlayCorrente();
+            final boolean ceraOverlay = s.grigliaVisibile
+                    || s.grigliaRiapriDopoTap;
+            s.nascondiOverlay();
+            final int gen = s.grigliaTapGen;
+            s.grigliaHandler.postDelayed(() -> {
+                if (s != instance) return;
+                if (gen != s.grigliaTapGen) return;
+                s.performGlobalAction(
+                        android.accessibilityservice.AccessibilityService
+                                .GLOBAL_ACTION_TAKE_SCREENSHOT);
+                if (ceraOverlay) {
+                    s.grigliaHandler.postDelayed(() -> {
+                        if (s != instance) return;
+                        if (gen != s.grigliaTapGen) return;
+                        riapriUltimoOverlay();
+                    }, 900L);
+                }
+            }, 200L);
+        });
+    }
+
+    public static void riapriUltimoOverlay() {
+        LisaAccessibilityService s=instance;
+        if (s==null) return;
+        String u=s.getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                .getString("ultimo_overlay", "nessuno");
+        if (u==null || u.equals("nessuno") || u.isEmpty()) return;
+        final String nome=u;
+        s.grigliaHandler.post(() -> {
+            if (nome.equals("griglia")) {
+                s.mostraOverlay(ModalitaOverlay.GRIGLIA);
+            } else if (nome.equals("etichette")) {
+                s.getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                        .edit().putInt("overlay_modo", 1).apply();
+                s.mostraOverlay(ModalitaOverlay.NUMERI);
+            } else {
+                s.getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                        .edit().putInt("overlay_modo", 0).apply();
+                s.mostraOverlay(ModalitaOverlay.NUMERI);
+            }
+            Log.i(TAG,"OVERLAY_RIPRISTINO "+nome);
+        });
+    }
+
+    /** Rect della cella n (1-based), o null se griglia chiusa o n fuori range. */
+    public static android.graphics.Rect cellaGrigliaCentro(int n) {
+        LisaAccessibilityService s = instance;
+        if (s == null || !s.grigliaVisibile
+                || s.grigliaModalita != ModalitaOverlay.GRIGLIA) return null;
+        if (n < 1 || n > s.grigliaCelle.size()) return null;
+        return new android.graphics.Rect(s.grigliaCelle.get(n - 1));
+    }
+
+    public static int livelloGriglia() {
+        LisaAccessibilityService s = instance;
+        return s == null ? -1 : s.grigliaLivello;
+    }
+
+    public static int grigliaTapGenAttuale() {
+        LisaAccessibilityService s = instance;
+        return s == null ? -1 : s.grigliaTapGen;
+    }
+
+    public static void preparaRiaperturaDopoGesto(final int genAcquisita) {
+        final LisaAccessibilityService s = instance;
+        if (s == null || genAcquisita < 0) return;
+        s.grigliaHandler.post(() -> {
+            if (s != instance || genAcquisita != s.grigliaTapGen) return;
+            android.content.SharedPreferences p = s.getSharedPreferences(
+                    "lisa_ui", android.content.Context.MODE_PRIVATE);
+            if (!"v2".equals(p.getString("lisa_engine", "v1"))) return;
+            s.grigliaRiapriDopoTap = true;
+            s.grigliaHandler.postDelayed(() -> {
+                if (s != instance || genAcquisita != s.grigliaTapGen) return;
+                android.content.SharedPreferences p2 = s.getSharedPreferences(
+                        "lisa_ui", android.content.Context.MODE_PRIVATE);
+                if (!"v2".equals(p2.getString("lisa_engine", "v1"))) return;
+                if (s.grigliaRiapriDopoTap) {
+                    s.grigliaRiapriDopoTap = false;
+                    s.mostraOverlay(ModalitaOverlay.GRIGLIA);
+                }
+            }, 800L);
+        });
+    }
+
+    public static boolean gestisciNumeroGriglia(int n, boolean conVerbo) {
+        LisaAccessibilityService s = instance;
+        if (s == null || !s.grigliaVisibile
+                || s.grigliaModalita != ModalitaOverlay.GRIGLIA) return false;
+        if (n < 1 || n > s.grigliaCelle.size()) return false;
+        final android.graphics.Rect cella =
+                new android.graphics.Rect(s.grigliaCelle.get(n - 1));
+        final int livello = s.grigliaLivello;
+        final boolean click = conVerbo || livello >= 1;
+        s.grigliaHandler.post(() -> {
+            if (click) {
+                s.grigliaRiapriDopoTap = false;
+                s.nascondiGriglia();
+                s.grigliaHandler.postDelayed(() -> {
+                    int cx = cella.centerX();
+                    int cy = cella.centerY();
+                    android.graphics.Path path =
+                            new android.graphics.Path();
+                    path.moveTo(cx, cy);
+                    android.accessibilityservice.GestureDescription gd =
+                            new android.accessibilityservice
+                                    .GestureDescription.Builder()
+                            .addStroke(new android.accessibilityservice
+                                    .GestureDescription
+                                    .StrokeDescription(path, 0L, 50L))
+                            .build();
+                    boolean ok = s.dispatchGesture(gd, null, null);
+                    if (ok) {
+                        s.grigliaRiapriDopoTap = true;
+                        final int gen = ++s.grigliaTapGen;
+                        s.grigliaHandler.postDelayed(() -> {
+                            if (gen != s.grigliaTapGen) return;
+                            if (s.grigliaRiapriDopoTap) {
+                                s.grigliaRiapriDopoTap = false;
+                                Log.i(TAG,"GRIGLIA_Riapri timeout-nochange");
+                                s.mostraOverlay(ModalitaOverlay.GRIGLIA);
+                            }
+                        }, 800L);
+                    }
+                    Log.i(TAG,"GRIGLIA_TAP_DISPATCH x=" + cx
+                            + " y=" + cy + " ok=" + ok);
+                }, 200L);
+            } else {
+                s.grigliaAreaAttiva = cella;
+                s.grigliaLivello = livello + 1;
+                s.mostraOverlay(ModalitaOverlay.GRIGLIA, true);
+                Log.i(TAG,"GRIGLIA_RAFFINA n=" + n
+                        + " livello=" + s.grigliaLivello
+                        + " area=" + cella);
+            }
+        });
+        return true;
+    }
+
+    public static boolean grigliaAttiva() {
+        LisaAccessibilityService s=instance;
+        return s!=null
+                && s.grigliaVisibile
+                && s.grigliaModalita==ModalitaOverlay.GRIGLIA;
+    }
+
+    public void mostraGriglia() {
+        mostraOverlay(ModalitaOverlay.GRIGLIA);
+    }
+
+    public void nascondiGriglia() {
+        if (grigliaModalita == ModalitaOverlay.GRIGLIA) {
+            nascondiOverlay();
+        }
+    }
+
+    public void cambiaDensitaGriglia(int delta) {
+        if (!grigliaVisibile
+                || grigliaModalita != ModalitaOverlay.GRIGLIA) {
+            Log.i(TAG,"GRIGLIA_DENSITA ignorata_non_attiva");
+            return;
+        }
+        android.content.SharedPreferences p = getSharedPreferences(
+                "lisa_ui",
+                android.content.Context.MODE_PRIVATE);
+        int att = p.getInt("griglia_densita", 1);
+        int nuova = att + delta;
+        if (nuova < 0) nuova = 0;
+        if (nuova > 2) nuova = 2;
+        if (nuova == att) return;
+        p.edit().putInt("griglia_densita", nuova).apply();
+        Log.i(TAG,"GRIGLIA_DENSITA "+att+" -> "+nuova);
+        mostraOverlay(ModalitaOverlay.GRIGLIA);
+    }
+
+    public void mostraGrigliaNumeri() {
+        getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                .edit().putInt("overlay_modo", 0).apply();
+        mostraOverlay(ModalitaOverlay.NUMERI);
+    }
+
+    public void mostraNumeriConEtichette() {
+        getSharedPreferences("lisa_ui", MODE_PRIVATE)
+                .edit().putInt("overlay_modo", 1).apply();
+        mostraOverlay(ModalitaOverlay.NUMERI);
+    }
+
+    public void nascondiGrigliaNumeri() {
+        if (grigliaModalita == ModalitaOverlay.NUMERI) {
+            nascondiOverlay();
+        }
+    }
+
+    private void programmaAutoHideOverlay() {
+        grigliaHandler.removeCallbacks(grigliaAutoHide);
+        boolean auto=getSharedPreferences("lisa_ui",MODE_PRIVATE)
+                .getBoolean("griglia_auto_attiva",false);
+        if (auto) grigliaHandler.postDelayed(grigliaAutoHide,8000L);
+    }
+
+    private android.graphics.Rect boundsOverlay(NodoCliccabile n) {
+        return n.bounds;
+    }
+
+    private int dpOverlay(android.content.Context c, int valore) {
+        return Math.round(valore * c.getResources()
+                .getDisplayMetrics().density);
+    }
+
+    private int spOverlay(android.content.Context c, float sp) {
+        return Math.round(sp * c.getResources()
+                .getDisplayMetrics().scaledDensity);
+    }
+
+    private int overlayBadgeHeightPx(android.content.Context c) {
+        return Math.max(
+                dpOverlay(c, BADGE_LATO_DP),
+                spOverlay(c, OVERLAY_TEXT_SP) + dpOverlay(c, 6));
+    }
+
+    private android.widget.TextView creaBadgeBase(
+            android.content.Context c) {
+        android.widget.TextView v=new android.widget.TextView(c);
+        v.setTextColor(android.graphics.Color.WHITE);
+        v.setTextSize(
+                android.util.TypedValue.COMPLEX_UNIT_SP,
+                OVERLAY_TEXT_SP);
+        v.setTypeface(android.graphics.Typeface.DEFAULT);
+        v.setIncludeFontPadding(false);
+        return v;
+    }
+
+    private android.widget.FrameLayout creaVistaNumeri(
+            android.content.Context c,
+            java.util.List<NodoCliccabile> nodi) {
+        boolean etichette=c.getSharedPreferences(
+                "lisa_ui",
+                android.content.Context.MODE_PRIVATE)
+                .getInt("overlay_modo", 0) == 1;
+        return creaVistaNumeri(c, nodi, etichette);
+    }
+
+    private android.widget.FrameLayout creaVistaNumeri(
+            android.content.Context c,
+            java.util.List<NodoCliccabile> nodi,
+            boolean mostraEtichette) {
+        android.widget.FrameLayout root=new android.widget.FrameLayout(c);
+        root.setContentDescription("lisa_overlay_numeri");
+        int lato=overlayBadgeHeightPx(c);
+        int offset=dpOverlay(c,BADGE_OFFSET_DP);
+        int soglia=dpOverlay(c,BADGE_SOGLIA_CENTRO_DP);
+
+        java.util.HashMap<String,Integer> conteggiSmart=
+                new java.util.HashMap<>();
+        if (mostraEtichette) {
+            for (NodoCliccabile n:nodi) {
+                String sm=n.etichettaSmart;
+                if (sm==null || sm.isEmpty()) continue;
+                String k=chiaveEtichetta(sm);
+                Integer cv=conteggiSmart.get(k);
+                conteggiSmart.put(k, cv==null ? 1 : cv+1);
+            }
+        }
+
+        int contatore=0;
+        for (NodoCliccabile n:nodi) {
+            String sm=n.etichettaSmart;
+            boolean smartU=mostraEtichette
+                    && sm != null && !sm.isEmpty()
+                    && conteggiSmart.get(chiaveEtichetta(sm))!=null
+                    && conteggiSmart.get(chiaveEtichetta(sm))==1;
+            if (smartU) {
+                n.numeroVisibile=0;
+            } else {
+                contatore++;
+                n.numeroVisibile=contatore;
+            }
+        }
+
+        for (NodoCliccabile n:nodi) {
+            android.graphics.Rect b=boundsOverlay(n);
+            android.widget.TextView badge=creaBadgeBase(c);
+            String contenuto;
+            if (!mostraEtichette) {
+                contenuto=String.valueOf(n.indice);
+            } else {
+                String sm=n.etichettaSmart;
+                boolean smartU=sm != null && !sm.isEmpty()
+                        && conteggiSmart.get(chiaveEtichetta(sm))!=null
+                        && conteggiSmart.get(chiaveEtichetta(sm))==1;
+                if (smartU) {
+                    contenuto=sm;
+                } else {
+                    contenuto=String.valueOf(n.numeroVisibile);
+                }
+            }
+            badge.setText(contenuto);
+            badge.setGravity(android.view.Gravity.CENTER);
+            badge.setSingleLine(true);
+
+            int padX=dpOverlay(c,5);
+            int maxW=dpOverlay(c,180);
+            int larghezza=Math.min(
+                    maxW,
+                    Math.max(
+                            lato,
+                            (int)Math.ceil(
+                                    badge.getPaint()
+                                            .measureText(contenuto))
+                                    + padX*2));
+            badge.setMaxWidth(maxW);
+            badge.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+
+            badge.setPadding(padX,0,padX,0);
+
+            android.graphics.drawable.GradientDrawable bg=
+                    new android.graphics.drawable.GradientDrawable();
+            bg.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+            bg.setCornerRadius(lato/2f);
+            bg.setColor(OVERLAY_BG_COLOR);
+            badge.setBackground(bg);
+
+            android.widget.FrameLayout.LayoutParams lp=
+                    new android.widget.FrameLayout.LayoutParams(
+                            larghezza,lato);
+
+            if (b.width()<soglia || b.height()<soglia) {
+                lp.leftMargin=Math.max(0,b.centerX()-larghezza/2);
+                lp.topMargin=Math.max(0,b.centerY()-lato/2);
+            } else {
+                lp.leftMargin=Math.max(0,b.left+offset);
+                lp.topMargin=Math.max(0,b.top+offset);
+            }
+            root.addView(badge,lp);
+        }
+        return root;
+    }
+
+    private android.widget.FrameLayout creaVistaGriglia(
+            final android.content.Context c) {
+        android.widget.FrameLayout root =
+                new android.widget.FrameLayout(c);
+        root.setContentDescription("lisa_overlay_griglia");
+
+        final int densita = c.getSharedPreferences(
+                "lisa_ui",
+                android.content.Context.MODE_PRIVATE
+        ).getInt("griglia_densita", 1);
+
+        final float density = c.getResources()
+                .getDisplayMetrics().density;
+
+        android.view.View canvasView = new android.view.View(c) {
+            private final android.graphics.Paint linePaint =
+                    new android.graphics.Paint();
+            private float radius = 24f;
+            private final android.graphics.Paint bgPaint =
+                    new android.graphics.Paint();
+            private final android.graphics.Paint textPaint =
+                    new android.graphics.Paint();
+            private int cols = 0;
+            private int rows = 0;
+            private int lastW = 0;
+            private int lastH = 0;
+            {
+                linePaint.setColor(0xFFCCCCCC);
+                linePaint.setStrokeWidth(
+                        Math.max(3.5f, density * 1.2f));
+                linePaint.setStyle(
+                        android.graphics.Paint.Style.STROKE);
+                textPaint.setColor(0xFFFFFFFF);
+                textPaint.setTypeface(
+                        android.graphics.Typeface.DEFAULT);
+                textPaint.setTextAlign(
+                        android.graphics.Paint.Align.CENTER);
+                textPaint.setAntiAlias(true);
+                bgPaint.setColor(OVERLAY_BG_COLOR);
+                bgPaint.setStyle(android.graphics.Paint.Style.FILL);
+                bgPaint.setAntiAlias(true);
+                linePaint.setPathEffect(
+                        new android.graphics.DashPathEffect(
+                                new float[]{dpOverlay(getContext(),6),
+                                        dpOverlay(getContext(),4)},0f));
+            }
+
+            private void rebuild(int w, int h) {
+                if (w <= 0 || h <= 0) return;
+                lastW = w; lastH = h;
+
+                android.graphics.Rect area = grigliaAreaAttiva;
+                boolean livelloBase = (area == null)
+                        || (area.left == 0 && area.top == 0
+                                && area.width() == w
+                                && area.height() == h);
+
+                if (livelloBase) {
+                    area = new android.graphics.Rect(0, 0, w, h);
+                    grigliaAreaAttiva = area;
+                    grigliaLivello = 0;
+
+                    int latoCorto = Math.min(w, h);
+                    float shortDp = latoCorto / density;
+
+                    int normale = Math.round(shortDp / 78f);
+                    if (normale < 6) normale = 6;
+                    if (normale > 16) normale = 16;
+
+                    int celleLatoCorto;
+                    if (densita <= 0) {
+                        celleLatoCorto = Math.max(4,
+                                Math.round(normale * 0.75f));
+                    } else if (densita >= 2) {
+                        celleLatoCorto = Math.min(20,
+                                Math.round(normale * 1.33f));
+                    } else {
+                        celleLatoCorto = normale;
+                    }
+
+                    float target = latoCorto / (float) celleLatoCorto;
+                    if (target < 1f) target = 1f;
+                    cols = Math.max(1, Math.round(w / target));
+                    rows = Math.max(1, Math.round(h / target));
+                } else {
+                    cols = 3;
+                    rows = 3;
+                }
+
+                textPaint.setTextSize(
+                        spOverlay(getContext(), OVERLAY_TEXT_SP));
+                radius = overlayBadgeHeightPx(getContext()) / 2f;
+
+                int aw = area.width();
+                int ah = area.height();
+
+                grigliaCelle.clear();
+                for (int r = 0; r < rows; r++) {
+                    int top = area.top + r * ah / rows;
+                    int bottom = area.top + (r + 1) * ah / rows;
+                    for (int col = 0; col < cols; col++) {
+                        int left = area.left + col * aw / cols;
+                        int right = area.left + (col + 1) * aw / cols;
+                        grigliaCelle.add(new android.graphics.Rect(
+                                left, top, right, bottom));
+                    }
+                }
+
+                Log.i(TAG,
+                        "GRIGLIA_LAYOUT w=" + w
+                        + " h=" + h
+                        + " livello=" + grigliaLivello
+                        + " area=" + area
+                        + " cols=" + cols
+                        + " rows=" + rows
+                        + " celle=" + (cols * rows));
+            }
+
+            @Override
+            protected void onSizeChanged(int w, int h,
+                    int oldw, int oldh) {
+                super.onSizeChanged(w, h, oldw, oldh);
+                rebuild(w, h);
+            }
+
+            @Override
+            protected void onDraw(
+                    android.graphics.Canvas canvas) {
+                super.onDraw(canvas);
+                int w = getWidth();
+                int h = getHeight();
+                if (cols <= 0 || rows <= 0) rebuild(w, h);
+                if (cols <= 0 || rows <= 0) return;
+
+                android.graphics.Rect areaDraw =
+                        grigliaAreaAttiva != null
+                                ? grigliaAreaAttiva
+                                : new android.graphics.Rect(0, 0, w, h);
+                for (int i = 1; i < cols; i++) {
+                    float x = areaDraw.left
+                            + i * areaDraw.width() / (float) cols;
+                    canvas.drawLine(x, areaDraw.top,
+                            x, areaDraw.bottom, linePaint);
+                }
+                for (int i = 1; i < rows; i++) {
+                    float y = areaDraw.top
+                            + i * areaDraw.height() / (float) rows;
+                    canvas.drawLine(areaDraw.left, y,
+                            areaDraw.right, y, linePaint);
+                }
+
+                android.graphics.Paint.FontMetrics fm =
+                        textPaint.getFontMetrics();
+                float dy = -(fm.ascent + fm.descent) / 2f;
+                float altezza = radius * 2f;
+                float padX = dpOverlay(getContext(), 5);
+                int n = 1;
+                for (android.graphics.Rect r : grigliaCelle) {
+                    String testo = String.valueOf(n);
+                    float larghezza = Math.max(
+                            altezza,
+                            textPaint.measureText(testo) + padX * 2f);
+                    float cx = r.centerX();
+                    float cy = r.centerY();
+                    canvas.drawRoundRect(
+                            cx - larghezza / 2f,
+                            cy - altezza / 2f,
+                            cx + larghezza / 2f,
+                            cy + altezza / 2f,
+                            altezza / 2f,
+                            altezza / 2f,
+                            bgPaint);
+                    canvas.drawText(testo, cx, cy + dy, textPaint);
+                    n++;
+                }
+            }
+        };
+
+        root.addView(canvasView,
+                new android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout
+                                .LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout
+                                .LayoutParams.MATCH_PARENT));
+        return root;
+    }
+
+    private void mostraOverlay(ModalitaOverlay modo) {
+        mostraOverlay(modo, false);
+    }
+
+    private void mostraOverlay(ModalitaOverlay modo, boolean preservaStato) {
+        android.graphics.Rect areaPrima = grigliaAreaAttiva;
+        int livelloPrima = grigliaLivello;
+        grigliaHandler.removeCallbacks(grigliaAutoHide);
+        Log.i(TAG,"OVERLAY_START modo="+modo
+                +" preserva="+preservaStato
+                +" livello="+livelloPrima);
+        chiudiOverlay();
+        if (preservaStato
+                && modo==ModalitaOverlay.GRIGLIA
+                && areaPrima != null) {
+            grigliaAreaAttiva = areaPrima;
+            grigliaLivello = livelloPrima;
+        }
+
+        AccessibilityNodeInfo root=getRootInActiveWindow();
+        if (root==null) {
+            Log.i(TAG,"OVERLAY_ABORT:root_null");
+            return;
+        }
+
+        android.view.accessibility.AccessibilityWindowInfo win=
+                root.getWindow();
+
+        android.hardware.display.DisplayManager dm=
+                (android.hardware.display.DisplayManager)
+                        getSystemService(DISPLAY_SERVICE);
+
+        android.view.Display display=
+                dm==null ? null : dm.getDisplay(
+                        win!=null
+                                ? win.getDisplayId()
+                                : android.view.Display.DEFAULT_DISPLAY);
+
+        if (display==null) {
+            Log.i(TAG,"OVERLAY_ABORT:display_null");
+            return;
+        }
+
+        try {
+            android.content.Context dc=createDisplayContext(display);
+
+            android.content.Context wc=dc.createWindowContext(
+                    android.view.WindowManager.LayoutParams
+                            .TYPE_ACCESSIBILITY_OVERLAY,
+                    null);
+
+            android.view.WindowManager wm=
+                    (android.view.WindowManager)
+                            wc.getSystemService(WINDOW_SERVICE);
+
+            if (wm==null) {
+                Log.i(TAG,"OVERLAY_ABORT:wm_null");
+                return;
+            }
+
+            if (modo==ModalitaOverlay.ETICHETTE) {
+                Log.w(TAG,"OVERLAY_ETICHETTE_NOT_IMPL");
+                return;
+            }
+
+            java.util.List<NodoCliccabile> nodi;
+            if (modo==ModalitaOverlay.GRIGLIA) {
+                nodi=new java.util.ArrayList<>();
+            } else {
+                nodi=enumeraNodiCliccabili();
+            }
+
+            if (modo==ModalitaOverlay.NUMERI)
+                ultimaListaNumeri=new java.util.ArrayList<>(nodi);
+
+            android.widget.FrameLayout vista;
+            if (modo==ModalitaOverlay.GRIGLIA) {
+                vista=creaVistaGriglia(wc);
+            } else {
+                int modoOverlay=wc.getSharedPreferences(
+                        "lisa_ui",
+                        android.content.Context.MODE_PRIVATE)
+                        .getInt("overlay_modo", 0);
+                if (modoOverlay != 0 && modoOverlay != 1)
+                    modoOverlay = 0;
+                vista=creaVistaNumeri(wc,nodi, modoOverlay == 1);
+            }
+
+            android.view.WindowManager.LayoutParams lp=
+                    new android.view.WindowManager.LayoutParams(
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                            android.view.WindowManager.LayoutParams
+                                    .TYPE_ACCESSIBILITY_OVERLAY,
+                            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                    | android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                            android.graphics.PixelFormat.TRANSLUCENT);
+
+            lp.gravity=
+                    android.view.Gravity.TOP
+                            | android.view.Gravity.START;
+
+            lp.x=0;
+            lp.y=0;
+
+            wm.addView(vista,lp);
+
+            sWm=wm;
+            sView=vista;
+
+            grigliaOverlayContext=wc;
+            grigliaWindowManager=wm;
+            grigliaNumeriContainer=vista;
+            grigliaWindowId=root.getWindowId();
+            grigliaPackageOrigine=
+                    root.getPackageName()==null
+                            ? ""
+                            : root.getPackageName().toString();
+            grigliaModalita=modo;
+            grigliaVisibile=true;
+
+            if (modo==ModalitaOverlay.NUMERI) {
+                programmaAutoHideOverlay();
+            }
+
+            Log.i(TAG,"OVERLAY_WM_OK modo="+modo
+                    +" count="+nodi.size());
+
+        } catch (Throwable e) {
+            Log.e(TAG,"OVERLAY_WM_CATCH",e);
+            nascondiOverlay();
+        }
+    }
+
+    private void chiudiOverlay() {
+        if (sView!=null && sWm!=null) {
+            try {
+                sWm.removeViewImmediate(sView);
+                Log.i(TAG,"OVERLAY_STACCATO");
+            } catch (Throwable e) {
+                Log.e(TAG,"OVERLAY_STACCO_FAIL",e);
+            }
+        }
+        if (grigliaNumeriContainer!=null
+                && grigliaWindowManager!=null
+                && grigliaNumeriContainer.isAttachedToWindow()) {
+            try {
+                grigliaWindowManager.removeViewImmediate(
+                        grigliaNumeriContainer);
+            } catch (Throwable e) {
+                Log.e(TAG,"OVERLAY_GRIGLIA_STACCO_FAIL",e);
+            }
+        }
+
+        sView=null; sWm=null;
+        grigliaWindowManager=null;
+        grigliaNumeriContainer=null;
+        grigliaOverlayContext=null;
+        grigliaSurfaceControl=null;
+        grigliaSurfacePackage=null;
+        grigliaViewHost=null;
+        grigliaWindowId=-1;
+        grigliaPackageOrigine="";
+        grigliaModalita=null;
+        grigliaVisibile=false;
+        ultimaListaNumeri=null;
+        grigliaCelle.clear();
+        grigliaAreaAttiva=null;
+        grigliaLivello=0;
+    }
+
+    public void nascondiOverlay() {
+        // Chiusura esplicita: invalida riaperture automatiche pendenti
+        grigliaRiapriDopoTap = false;
+        grigliaTapGen++;
+        grigliaHandler.removeCallbacks(grigliaAutoHide);
+        chiudiOverlay();
+    }
+
+    public void nascondiOverlayOLD() {
+        grigliaHandler.removeCallbacks(grigliaAutoHide);
+
+        if (grigliaNumeriContainer!=null
+                && grigliaWindowManager!=null) {
+            try {
+                grigliaWindowManager.removeViewImmediate(
+                        grigliaNumeriContainer);
+            } catch (Throwable ignored) {}
+        }
+
+        grigliaWindowManager=null;
+        grigliaNumeriContainer=null;
+        grigliaOverlayContext=null;
+        grigliaSurfaceControl=null;
+        grigliaSurfacePackage=null;
+        grigliaViewHost=null;
+        grigliaWindowId=-1;
+        grigliaPackageOrigine="";
+        grigliaModalita=null;
+        grigliaVisibile=false;
+    }
+
+    private void invalidaOverlaySeNecessario(
+            android.view.accessibility.AccessibilityEvent event) {
+
+        if (event==null) return;
+
+        if (grigliaRiapriDopoTap) {
+            int t0 = event.getEventType();
+            if (t0 == android.view.accessibility.AccessibilityEvent
+                    .TYPE_WINDOW_STATE_CHANGED) {
+                String p0 = event.getPackageName() == null
+                        ? "" : event.getPackageName().toString();
+                if (!p0.equals(getPackageName())) {
+                    grigliaRiapriDopoTap = false;
+                    Log.i(TAG,"GRIGLIA_Riapri dopo tap pkg="+p0);
+                    mostraOverlay(ModalitaOverlay.GRIGLIA);
+                    return;
+                }
+            }
+        }
+
+        if (!grigliaVisibile) return;
+
+        int tipo=event.getEventType();
+        boolean cambio = tipo == android.view.accessibility
+                        .AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+
+        if (!cambio) return;
+
+        String pkg=event.getPackageName()==null
+                ? "" : event.getPackageName().toString();
+
+        // Ignora eventi del proprio overlay, IME e popup di sistema
+        if (pkg.equals(getPackageName())
+                || "com.android.systemui".equals(pkg)
+                || "com.google.android.inputmethod.latin".equals(pkg)
+                || "com.oplus.screenshot".equals(pkg)
+                || "com.mpointer.touchpad.bigphones".equals(pkg)
+                || "com.oplus.screenrecorder".equals(pkg))
+            return;
+
+        if (grigliaModalita==ModalitaOverlay.GRIGLIA) {
+            Log.i(TAG,"GRIGLIA_RICALCOLA pkg="+pkg+" tipo="+tipo);
+            grigliaAreaAttiva=null;
+            grigliaLivello=0;
+            programmaRefreshOverlay();
+            return;
+        }
+        if (grigliaModalita==ModalitaOverlay.ETICHETTE) {
+            Log.i(TAG,"OVERLAY_AUTOHIDE pkg="+pkg+" tipo="+tipo);
+            nascondiOverlay();
+            return;
+        }
+        Log.i(TAG,"OVERLAY_REATTACH pkg="+pkg+" tipo="+tipo);
+        programmaRefreshOverlay();
+    }
+
+
+    @Override
+    public void onAccessibilityEvent(android.view.accessibility.AccessibilityEvent event) {
+        if (event == null) return;
+
+        invalidaOverlaySeNecessario(event);
+
+        int tipo = event.getEventType();
+
+        String eventPkg =
+                event.getPackageName() == null
+                        ? ""
+                        : event.getPackageName().toString();
+
+        boolean eventoSettingsToggle =
+                toggleSettingsCallback != null
+                && (toggleSettingsPackage != null
+                ? toggleSettingsPackage.equals(eventPkg)
+                : "com.android.settings".equals(eventPkg))
+                && tipo == android.view.accessibility.AccessibilityEvent
+                        .TYPE_WINDOW_CONTENT_CHANGED;
+
+        if (toggleSettingsCallback != null) {
+            Log.i(
+                    TAG,
+                    "V2B2_EVENT type="
+                            + tipo
+                            + " pkg="
+                            + eventPkg
+            );
+        }
+
+        boolean tipoAccettato =
+                tipo == android.view.accessibility.AccessibilityEvent
+                        .TYPE_WINDOW_STATE_CHANGED
+                || tipo == android.view.accessibility.AccessibilityEvent
+                        .TYPE_VIEW_FOCUSED
+                || eventoSettingsToggle;
+
+        if (!tipoAccettato) {
+            return;
+        }
+
+        String eventClass =
+                event.getClassName() == null
+                        ? ""
+                        : event.getClassName().toString();
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+
+        String rootPkg = "";
+        String rootClass = "";
+
+        if (root != null) {
+            rootPkg =
+                    root.getPackageName() == null
+                            ? ""
+                            : root.getPackageName().toString();
+
+            rootClass =
+                    root.getClassName() == null
+                            ? ""
+                            : root.getClassName().toString();
+        }
+
+        // Lisa è il pannello di controllo dell'assistente:
+        // non deve sostituire l'app che l'utente stava realmente usando.
+        String pacchettoLisa = getPackageName();
+
+        if (pacchettoLisa.equals(eventPkg)) {
+            Log.i(
+                    TAG,
+                    "CTX_V1 ignore_self keep=" + contestoPacchetto
+            );
+            return;
+        }
+
+        boolean eventoTransitorio =
+                "com.google.android.inputmethod.latin".equals(eventPkg) ||
+                "com.android.systemui".equals(eventPkg) ||
+                ("com.google.android.googlequicksearchbox".equals(eventPkg)
+                        && !rootPkg.isEmpty()
+                        && !eventPkg.equals(rootPkg));
+
+        // Anche tastiera/SystemUI sopra la finestra di Lisa
+        // non devono cancellare l'ultimo contesto reale.
+        if (eventoTransitorio && pacchettoLisa.equals(rootPkg)) {
+            Log.i(
+                    TAG,
+                    "CTX_V1 ignore_overlay_self keep=" + contestoPacchetto
+            );
+            return;
+        }
+
+        String pacchettoScelto;
+
+        if (eventoTransitorio && !rootPkg.isEmpty()) {
+            pacchettoScelto = rootPkg;
+        } else if (!eventPkg.isEmpty()) {
+            pacchettoScelto = eventPkg;
+        } else {
+            pacchettoScelto = rootPkg;
+        }
+
+        boolean focusInput = false;
+        boolean editabile = false;
+
+        // La root viene usata per il focus solo se appartiene
+        // realmente all'app che stiamo considerando corrente.
+        if (root != null && pacchettoScelto.equals(rootPkg)) {
+            AccessibilityNodeInfo focus =
+                    root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+
+            if (focus != null) {
+                focusInput = true;
+                editabile = focus.isEditable();
+            }
+        }
+
+        contestoPacchetto = pacchettoScelto;
+        contestoClasse =
+                pacchettoScelto.equals(eventPkg)
+                        ? eventClass
+                        : rootClass;
+        contestoWindowId = event.getWindowId();
+        contestoFocusInput = focusInput;
+        contestoEditabile = editabile;
+        contestoTimestamp = System.currentTimeMillis();
+
+        Log.i(TAG,
+                "CTX_V1"
+                + " app=" + contestoPacchetto
+                + " classe=" + contestoClasse
+                + " window=" + contestoWindowId
+                + " focus=" + contestoFocusInput
+                + " editable=" + contestoEditabile);
+
+        provaToggleSettingsPendente();
+    }
+
+    public String getCurrentPackageName() {
+        return contestoPacchetto;
+    }
+
+    public String getCurrentClassName() {
+        return contestoClasse;
+    }
+
+    public int getCurrentWindowId() {
+        return contestoWindowId;
+    }
+
+    public boolean hasCurrentInputFocus() {
+        return contestoFocusInput;
+    }
+
+    public boolean isCurrentEditable() {
+        return contestoEditabile;
+    }
+
+    public long getCurrentContextTimestamp() {
+        return contestoTimestamp;
+    }
+
+    public java.util.ArrayList<String> getVisiblePackageNames() {
+        java.util.LinkedHashSet<String> trovati =
+                new java.util.LinkedHashSet<>();
+
+        try {
+            java.util.List<android.view.accessibility.AccessibilityWindowInfo> finestre =
+                    getWindows();
+
+            if (finestre != null) {
+                for (android.view.accessibility.AccessibilityWindowInfo finestra : finestre) {
+                    if (finestra == null) continue;
+
+                    AccessibilityNodeInfo root = finestra.getRoot();
+                    if (root == null || root.getPackageName() == null) continue;
+
+                    String pkg = root.getPackageName().toString().trim();
+
+                    if (pkg.isEmpty()) continue;
+                    if (pkg.equals(getPackageName())) continue;
+                    if ("com.google.android.inputmethod.latin".equals(pkg)) continue;
+                    if ("com.android.systemui".equals(pkg)) continue;
+
+                    trovati.add(pkg);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "CTX_WINDOWS errore", e);
+        }
+
+        return new java.util.ArrayList<>(trovati);
+    }
+
+    @Override
+    public void onInterrupt() {
+        Log.d(TAG, "Servizio interrotto");
+    }
+
+
+    private void spegniLisaCompletamente() {
+        rimuoviIndicatoreLisa();
+
+        // Cancella tutte le chiusure pendenti delle due vignette.
+        for (Runnable r :
+                new java.util.ArrayList<>(
+                        overlayRemovalRunnables.values()
+                )) {
+
+            overlayRemovalHandler.removeCallbacks(r);
+        }
+
+        overlayRemovalRunnables.clear();
+
+        // Cleanup definitivo vignetta semplice.
+        if (indicatoreSemplice != null
+                && sempliceWindowManager != null) {
+
+            try {
+                indicatoreSemplice.animate().cancel();
+
+                indicatoreSemplice.setVisibility(
+                        android.view.View.GONE
+                );
+
+                sempliceWindowManager.removeViewImmediate(
+                        indicatoreSemplice
+                );
+
+            } catch (Exception ignored) {
+            }
+        }
+
+        // Cleanup definitivo vignetta diagnosi.
+        if (indicatoreTelemetria != null
+                && telemetriaWindowManager != null) {
+
+            try {
+                indicatoreTelemetria.animate().cancel();
+
+                indicatoreTelemetria.setVisibility(
+                        android.view.View.GONE
+                );
+
+                telemetriaWindowManager.removeViewImmediate(
+                        indicatoreTelemetria
+                );
+
+            } catch (Exception ignored) {
+            }
+        }
+
+        indicatoreSemplice = null;
+        indicatoreSempliceLp = null;
+        sempliceWindowManager = null;
+
+        indicatoreTelemetria = null;
+        indicatoreTelemetriaLp = null;
+        diagnosiLayout = null;
+
+        telemetriaAscoltato = null;
+        telemetriaInterpretato = null;
+        telemetriaAzione = null;
+        telemetriaRisultato = null;
+
+        instance = null;
+
+        LisaSpeaker.spegni();
+
+        try {
+            Intent voiceIntent =
+                    new Intent(this, LisaVoiceService.class);
+
+            stopService(voiceIntent);
+        } catch (Exception ignored) {
+        }
+
+        Log.d(TAG, "Lisa completamente spenta");
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        Log.d(TAG, "AccessibilityService unbound: VoiceService NON viene arrestata");
+        pulisciToggleSettingsPendente();
+        return super.onUnbind(intent);
+    }
+
+    public void mostraDock() {
+        grigliaHandler.post(() -> {
+            if (!servizioAttivo) return;
+            if (dockView == null) dockView = new LisaDockView(this);
+            dockView.mostra();
+        });
+    }
+
+    public void nascondiDock() {
+        grigliaHandler.post(() -> {
+            if (dockView != null) dockView.nascondi();
+        });
+    }
+
+    public void setDockLato(String lato) {
+        grigliaHandler.post(() -> {
+            if (!servizioAttivo) return;
+            if (dockView == null) dockView = new LisaDockView(this);
+            dockView.setLato(lato);
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+
+        // 🟢 Rilascio motore gesture prima di distruggere il servizio
+        LisaGestureEngine.release();
+
+        nascondiGrigliaNumeri();
+
+        pulisciToggleSettingsPendente();
+
+        if (thermalSafetyMonitor != null) {
+            thermalSafetyMonitor.stop();
+            thermalSafetyMonitor = null;
+        }
+
+        spegniLisaCompletamente();
+
+        servizioAttivo = false;
+        if (dockView != null) {
+            dockView.nascondi();
+            dockView = null;
+        }
+
+        super.onDestroy();
+    }
+
+    public void apriApp(String packageName) {
+        Intent intent = getPackageManager().getLaunchIntentForPackage(packageName);
+        if (intent != null) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            Log.d(TAG, "Aperta app: " + packageName);
+        } else {
+            Log.e(TAG, "App non trovata: " + packageName);
+        }
+    }
+
+    public boolean cliccaTesto(String testo) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+
+        Log.d("LisaAccessibility", "CLICK richiesta: " + testo);
+
+        if (root == null) {
+            Log.e("LisaAccessibility", "CLICK: root nullo");
+            return false;
+        }
+
+        Log.d("LisaAccessibility", "CLICK pacchetto: " +
+                (root.getPackageName() == null ? "" : root.getPackageName().toString()));
+
+        AccessibilityNodeInfo nodo =
+                AccessibilityUtils.trovaPerTesto(root, testo);
+
+        if (nodo == null) {
+            Log.e("LisaAccessibility", "CLICK nodo NON trovato: " + testo);
+            return false;
+        }
+
+        Log.d("LisaAccessibility", "CLICK nodo trovato: testo=" +
+                nodo.getText() +
+                " descrizione=" +
+                nodo.getContentDescription() +
+                " classe=" +
+                nodo.getClassName() +
+                " cliccabile=" +
+                nodo.isClickable());
+
+        boolean risultato = AccessibilityUtils.click(nodo);
+
+        Log.d("LisaAccessibility", "CLICK risultato ACTION_CLICK: " + risultato);
+
+        return risultato;
+    }
+
+    // ============================================================
+    // P4.1 VOICE ACCESS CORE - TOGGLE GENERICO
+    // ============================================================
+
+    private boolean packageSettingsPendenteCoerente() {
+        if (toggleSettingsPackage != null
+                && !toggleSettingsPackage.isEmpty()) {
+            return toggleSettingsPackage.equals(
+                    contestoPacchetto);
+        }
+
+        return "com.android.settings".equals(
+                contestoPacchetto);
+    }
+
+    public void impostaPackageSettingsPendente(
+            String packageName) {
+
+        toggleSettingsPackage =
+                packageName == null
+                        ? null
+                        : packageName.trim();
+
+        Log.i(
+                TAG,
+                "V2C1_SETTINGS_PACKAGE="
+                        + toggleSettingsPackage
+        );
+    }
+
+    private volatile String toggleSettingsCapability = null;
+
+    public void attendiSettingsEImpostaToggle(
+            String[] etichette,
+            String capability,
+            boolean statoDesiderato,
+            ToggleResultCallback callback) {
+
+        if (callback == null
+                || etichette == null
+                || etichette.length == 0) {
+
+            if (callback != null) {
+                callback.onResult(
+                        false,
+                        null,
+                        "nessuna_etichetta_toggle"
+                );
+            }
+            return;
+        }
+
+        pulisciToggleSettingsPendente();
+
+        toggleSettingsEtichette = etichette.clone();
+        toggleSettingsStato = statoDesiderato;
+        toggleSettingsCallback = callback;
+        toggleSettingsCapability = capability;
+
+        toggleSettingsHandler.postDelayed(
+                toggleSettingsTimeout,
+                4000L
+        );
+    }
+
+    private void provaToggleSettingsPendente() {
+
+        if (toggleSettingsCallback == null
+                || !packageSettingsPendenteCoerente()) {
+            return;
+        }
+
+        if (toggleSettingsRetryInCorso) {
+            return;
+        }
+
+        toggleSettingsHandler.removeCallbacks(
+                toggleSettingsTimeout
+        );
+
+        toggleSettingsHandler.postDelayed(
+                toggleSettingsTimeout,
+                4000L
+        );
+
+        if (toggleSettingsTentativoProgrammato) {
+            return;
+        }
+
+        toggleSettingsTentativoProgrammato = true;
+
+        toggleSettingsHandler.postDelayed(
+                toggleSettingsEsegui,
+                450L
+        );
+    }
+
+    private void eseguiToggleSettingsPendente() {
+
+        toggleSettingsTentativoProgrammato = false;
+
+        if (toggleSettingsCallback == null) {
+            return;
+        }
+
+        if (!packageSettingsPendenteCoerente()) {
+            return;
+        }
+
+        if (toggleSettingsRetryInCorso) {
+            return;
+        }
+
+        toggleSettingsRetryInCorso = true;
+        toggleSettingsGiro = 1;
+
+        eseguiGiroToggleSettings();
+    }
+
+    private void eseguiRetryToggleSettings() {
+
+        if (!toggleSettingsRetryInCorso
+                || toggleSettingsCallback == null) {
+            return;
+        }
+
+        if (!packageSettingsPendenteCoerente()) {
+            return;
+        }
+
+        toggleSettingsGiro++;
+
+        eseguiGiroToggleSettings();
+    }
+
+    private void eseguiGiroToggleSettings() {
+
+        if (!toggleSettingsRetryInCorso
+                || toggleSettingsCallback == null) {
+            return;
+        }
+
+        final String[] etichette =
+                toggleSettingsEtichette;
+
+        final boolean stato =
+                Boolean.TRUE.equals(toggleSettingsStato);
+
+        final String capability = toggleSettingsCapability;
+
+        final ToggleResultCallback callback =
+                toggleSettingsCallback;
+
+        final int giro =
+                toggleSettingsGiro;
+
+        Log.i(
+                TAG,
+                "V2B2_GIRO numero=" + giro
+        );
+
+        provaEtichettaToggle(
+                etichette,
+                capability,
+                0,
+                stato,
+                true,
+                (riuscito, statoFinale, dettaglio) -> {
+
+                    if (toggleSettingsCallback
+                            != callback) {
+                        return;
+                    }
+
+                    if (riuscito) {
+                        pulisciToggleSettingsPendente();
+
+                        callback.onResult(
+                                true,
+                                statoFinale,
+                                dettaglio
+                        );
+                        return;
+                    }
+
+                    boolean tutteAssenti =
+                            "tutte_etichette_non_trovate"
+                                    .equals(dettaglio);
+
+                    if (tutteAssenti
+                            && giro < 3) {
+
+                        Log.i(
+                                TAG,
+                                "V2B2_RETRY prossimo_giro="
+                                        + (giro + 1)
+                        );
+
+                        toggleSettingsHandler.removeCallbacks(
+                                toggleSettingsRetry
+                        );
+
+                        toggleSettingsHandler.postDelayed(
+                                toggleSettingsRetry,
+                                600L
+                        );
+                        return;
+                    }
+
+                    pulisciToggleSettingsPendente();
+
+                    callback.onResult(
+                            false,
+                            statoFinale,
+                            dettaglio
+                    );
+                }
+        );
+    }
+
+    private void provaEtichettaToggle(
+            String[] etichette,
+            String capability,
+            int indice,
+            boolean statoDesiderato,
+            boolean tutteEtichetteNonTrovate,
+            ToggleResultCallback callback) {
+
+        if (etichette == null
+                || indice >= etichette.length) {
+
+            callback.onResult(
+                    false,
+                    null,
+                    tutteEtichetteNonTrovate
+                            ? "tutte_etichette_non_trovate"
+                            : "nessuna_etichetta_compatibile"
+            );
+            return;
+        }
+
+        final String etichetta =
+                etichette[indice];
+
+        Log.i(
+                TAG,
+                "V2B2_PROVA indice="
+                        + indice
+                        + " etichetta="
+                        + etichetta
+        );
+
+        impostaTogglePerEtichetta(
+                etichetta,
+                capability,
+                statoDesiderato,
+                (riuscito, statoFinale, dettaglio) -> {
+
+                    if (riuscito) {
+                        callback.onResult(
+                                true,
+                                statoFinale,
+                                "etichetta="
+                                        + etichetta
+                                        + ";"
+                                        + dettaglio
+                        );
+                        return;
+                    }
+
+                    boolean nessunClick =
+                            "root_non_disponibile".equals(dettaglio)
+                            || "etichetta_non_trovata".equals(dettaglio)
+                            || "toggle_non_trovato".equals(dettaglio)
+                            || "parent_cliccabile_non_trovato".equals(dettaglio);
+
+                    if (nessunClick) {
+
+                        boolean ancoraTutteAssenti =
+                                tutteEtichetteNonTrovate
+                                && "etichetta_non_trovata"
+                                        .equals(dettaglio);
+
+                        provaEtichettaToggle(
+                                etichette,
+                                capability,
+                                indice + 1,
+                                statoDesiderato,
+                                ancoraTutteAssenti,
+                                callback
+                        );
+                        return;
+                    }
+
+                    callback.onResult(
+                            false,
+                            statoFinale,
+                            "etichetta="
+                                    + etichetta
+                                    + ";"
+                                    + dettaglio
+                    );
+                }
+        );
+    }
+
+    private void pulisciToggleSettingsPendente() {
+
+        toggleSettingsHandler.removeCallbacks(
+                toggleSettingsTimeout
+        );
+
+        toggleSettingsHandler.removeCallbacks(
+                toggleSettingsEsegui
+        );
+
+        toggleSettingsHandler.removeCallbacks(
+                toggleSettingsRetry
+        );
+
+        toggleSettingsEtichette = null;
+        toggleSettingsStato = null;
+        toggleSettingsCallback = null;
+        toggleSettingsPackage = null;
+        toggleSettingsCapability = null;
+        toggleSettingsTentativoProgrammato = false;
+        toggleSettingsRetryInCorso = false;
+        toggleSettingsGiro = 0;
+    }
+
+    private void dumpNodiRilevanti() {
+
+        AccessibilityNodeInfo root =
+                getRootInActiveWindow();
+
+        if (root == null) {
+            Log.i(TAG, "DUMP root=null");
+            return;
+        }
+
+        Log.i(TAG, "DUMP BEGIN");
+
+        dumpNodoRicorsivo(root, 0);
+
+        Log.i(TAG, "DUMP END");
+    }
+
+    private void dumpNodoRicorsivo(
+            AccessibilityNodeInfo nodo,
+            int livello) {
+
+        if (nodo == null || livello > 12) {
+            return;
+        }
+
+        String testo =
+                nodo.getText() == null
+                        ? ""
+                        : nodo.getText().toString();
+
+        String descrizione =
+                nodo.getContentDescription() == null
+                        ? ""
+                        : nodo.getContentDescription().toString();
+
+        String classe =
+                nodo.getClassName() == null
+                        ? ""
+                        : nodo.getClassName().toString();
+
+        String testoLower =
+                testo.toLowerCase(java.util.Locale.ROOT);
+        String descrizioneLower =
+                descrizione.toLowerCase(java.util.Locale.ROOT);
+        String classeLower =
+                classe.toLowerCase(java.util.Locale.ROOT);
+
+        boolean rilevante =
+                testoLower.contains("posizione")
+                || descrizioneLower.contains("posizione")
+                || classeLower.contains("switch")
+                || classeLower.contains("toggle")
+                || nodo.isCheckable();
+
+        if (rilevante) {
+            android.graphics.Rect bounds =
+                    new android.graphics.Rect();
+
+            nodo.getBoundsInScreen(bounds);
+
+            Log.i(
+                    TAG,
+                    "DUMP lvl=" + livello
+                            + " cls=" + classe
+                            + " txt=" + testo
+                            + " desc=" + descrizione
+                            + " bounds=" + bounds.toShortString()
+                            + " checkable=" + nodo.isCheckable()
+                            + " checked=" + nodo.isChecked()
+                            + " clickable=" + nodo.isClickable()
+                            + " children=" + nodo.getChildCount()
+            );
+        }
+
+        for (int i = 0; i < nodo.getChildCount(); i++) {
+            dumpNodoRicorsivo(nodo.getChild(i), livello + 1);
+        }
+    }
+
+    public interface ToggleResultCallback {
+        void onResult(
+                boolean riuscito,
+                Boolean statoFinale,
+                String dettaglio
+        );
+    }
+
+    public void impostaTogglePerEtichetta(
+            String etichetta,
+            String capability,
+            boolean statoDesiderato,
+            ToggleResultCallback callback) {
+
+        if (callback == null) return;
+
+        AccessibilityNodeInfo root =
+                getRootInActiveWindow();
+
+        if (root == null) {
+            Log.i(
+                    TAG,
+                    "V2B2_CORE root_non_disponibile etichetta="
+                            + etichetta
+            );
+            callback.onResult(
+                    false,
+                    null,
+                    "root_non_disponibile"
+            );
+            return;
+        }
+
+        AccessibilityNodeInfo label =
+                trovaEtichettaToggle(
+                        root,
+                        etichetta
+                );
+
+        if (label == null) {
+            Log.i(
+                    TAG,
+                    "V2B2_CORE etichetta_non_trovata etichetta="
+                            + etichetta
+            );
+
+            dumpNodiRilevanti();
+
+            callback.onResult(
+                    false,
+                    null,
+                    "etichetta_non_trovata"
+            );
+            return;
+        }
+
+        AccessibilityNodeInfo toggle =
+                trovaToggleAssociato(label);
+
+        if (toggle == null) {
+            Log.i(
+                    TAG,
+                    "V2B2_CORE toggle_non_trovato etichetta="
+                            + etichetta
+            );
+            callback.onResult(
+                    false,
+                    null,
+                    "toggle_non_trovato"
+            );
+            return;
+        }
+
+        Boolean statoPrima =
+                leggiStatoToggle(toggle);
+
+        Log.i(
+                TAG,
+                "P4 TOGGLE "
+                        + etichetta
+                        + " prima="
+                        + statoPrima
+                        + " desiderato="
+                        + statoDesiderato
+        );
+
+        if (statoPrima != null
+                && statoPrima.booleanValue()
+                == statoDesiderato) {
+
+            callback.onResult(
+                    true,
+                    statoPrima,
+                    "gia_nello_stato_richiesto"
+            );
+            return;
+        }
+
+        boolean cliccato =
+                AccessibilityUtils.click(toggle);
+
+        if (!cliccato) {
+            cliccato =
+                    AccessibilityUtils.click(label);
+        }
+
+        if (!cliccato) {
+            callback.onResult(
+                    false,
+                    statoPrima,
+                    "parent_cliccabile_non_trovato"
+            );
+            return;
+        }
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).postDelayed(
+                () -> verificaToggle(
+                        etichetta,
+                        capability,
+                        statoDesiderato,
+                        callback
+                ),
+                700L
+        );
+    }
+
+    private void verificaToggle(
+            String etichetta,
+            String capability,
+            boolean statoDesiderato,
+            ToggleResultCallback callback) {
+
+        AccessibilityNodeInfo root =
+                getRootInActiveWindow();
+
+        if (root == null) {
+            if (capability != null) {
+            SystemCapabilityRegistry.Result r =
+                    SystemCapabilityRegistry.get(
+                            getApplicationContext(), capability);
+            if (r != null && r.enabled != null
+                    && r.enabled.booleanValue() == statoDesiderato) {
+                callback.onResult(true, r.enabled, "confermato_da_registry");
+                return;
+            }
+        }
+        callback.onResult(
+                false,
+                null,
+                "root_post_click_non_disponibile"
+        );
+        return;
+        }
+
+        AccessibilityNodeInfo label =
+                trovaEtichettaToggle(
+                        root,
+                        etichetta
+                );
+
+        if (label == null) {
+            if (capability != null) {
+            SystemCapabilityRegistry.Result r =
+                    SystemCapabilityRegistry.get(
+                            getApplicationContext(), capability);
+            if (r != null && r.enabled != null
+                    && r.enabled.booleanValue() == statoDesiderato) {
+                callback.onResult(true, r.enabled, "confermato_da_registry");
+                return;
+            }
+        }
+        callback.onResult(
+                false,
+                null,
+                "etichetta_post_click_non_trovata"
+        );
+        return;
+        }
+
+        AccessibilityNodeInfo toggle =
+                trovaToggleAssociato(label);
+
+        if (toggle == null) {
+            if (capability != null) {
+            SystemCapabilityRegistry.Result r =
+                    SystemCapabilityRegistry.get(
+                            getApplicationContext(), capability);
+            if (r != null && r.enabled != null
+                    && r.enabled.booleanValue() == statoDesiderato) {
+                callback.onResult(true, r.enabled, "confermato_da_registry");
+                return;
+            }
+        }
+        callback.onResult(
+                false,
+                null,
+                "toggle_post_click_non_trovato"
+        );
+        return;
+        }
+
+        Boolean statoDopo =
+                leggiStatoToggle(toggle);
+
+        boolean ok =
+                statoDopo != null
+                        && statoDopo.booleanValue()
+                        == statoDesiderato;
+
+        Log.i(
+                TAG,
+                "P4 TOGGLE verifica "
+                        + etichetta
+                        + " dopo="
+                        + statoDopo
+                        + " ok="
+                        + ok
+        );
+
+        callback.onResult(
+                ok,
+                statoDopo,
+                ok
+                        ? "stato_verificato"
+                        : "stato_non_confermato"
+        );
+    }
+
+    private AccessibilityNodeInfo trovaEtichettaToggle(
+            AccessibilityNodeInfo nodo,
+            String etichetta) {
+
+        if (nodo == null
+                || etichetta == null) {
+            return null;
+        }
+
+        if (nodo.isVisibleToUser()
+                && nodo.isEnabled()) {
+
+            String target =
+                    normalizzaEtichettaToggle(
+                            etichetta
+                    );
+
+            String testo =
+                    normalizzaEtichettaToggle(
+                            nodo.getText() == null
+                                    ? ""
+                                    : nodo.getText().toString()
+                    );
+
+            String descrizione =
+                    normalizzaEtichettaToggle(
+                            nodo.getContentDescription() == null
+                                    ? ""
+                                    : nodo.getContentDescription()
+                                            .toString()
+                    );
+
+            if ((!target.isEmpty())
+                    && (target.equals(testo)
+                    || target.equals(descrizione))) {
+
+                return nodo;
+            }
+        }
+
+        for (int i = 0;
+                i < nodo.getChildCount();
+                i++) {
+
+            AccessibilityNodeInfo trovato =
+                    trovaEtichettaToggle(
+                            nodo.getChild(i),
+                            etichetta
+                    );
+
+            if (trovato != null) {
+                return trovato;
+            }
+        }
+
+        return null;
+    }
+
+    private static final class ToggleCandidato {
+
+        AccessibilityNodeInfo nodo = null;
+        long distanza = Long.MAX_VALUE;
+    }
+
+    private AccessibilityNodeInfo trovaToggleAssociato(
+            AccessibilityNodeInfo etichetta) {
+
+        if (etichetta == null) return null;
+
+        android.graphics.Rect rEtichetta =
+                new android.graphics.Rect();
+
+        etichetta.getBoundsInScreen(
+                rEtichetta
+        );
+
+        AccessibilityNodeInfo contenitore =
+                etichetta.getParent();
+
+        for (int livello = 0;
+                livello < 4
+                        && contenitore != null;
+                livello++) {
+
+            ToggleCandidato candidato =
+                    new ToggleCandidato();
+
+            cercaTogglePiuVicino(
+                    contenitore,
+                    rEtichetta,
+                    etichetta,
+                    candidato
+            );
+
+            if (candidato.nodo != null) {
+
+                Log.i(
+                        TAG,
+                        "V2B2_MATCH livello="
+                                + livello
+                                + " distanza2="
+                                + candidato.distanza
+                );
+
+                return candidato.nodo;
+            }
+
+            contenitore =
+                    contenitore.getParent();
+        }
+
+        return null;
+    }
+
+    private void cercaTogglePiuVicino(
+            AccessibilityNodeInfo nodo,
+            android.graphics.Rect rEtichetta,
+            AccessibilityNodeInfo originale,
+            ToggleCandidato candidato) {
+
+        if (nodo == null
+                || candidato == null) {
+            return;
+        }
+
+        if (nodo != originale
+                && nodo.isVisibleToUser()
+                && nodo.isEnabled()
+                && nodoEToggle(nodo)) {
+
+            android.graphics.Rect rToggle =
+                    new android.graphics.Rect();
+
+            nodo.getBoundsInScreen(
+                    rToggle
+            );
+
+            long dx =
+                    (long) rToggle.centerX()
+                            - (long) rEtichetta.centerX();
+
+            long dy =
+                    (long) rToggle.centerY()
+                            - (long) rEtichetta.centerY();
+
+            long distanza =
+                    dx * dx + dy * dy;
+
+            if (distanza < candidato.distanza) {
+                candidato.nodo = nodo;
+                candidato.distanza = distanza;
+            }
+        }
+
+        for (int i = 0;
+                i < nodo.getChildCount();
+                i++) {
+
+            cercaTogglePiuVicino(
+                    nodo.getChild(i),
+                    rEtichetta,
+                    originale,
+                    candidato
+            );
+        }
+    }
+
+    private boolean nodoEToggle(
+            AccessibilityNodeInfo nodo) {
+
+        if (nodo == null) return false;
+
+        if (nodo.isCheckable()) {
+            return true;
+        }
+
+        String classe =
+                nodo.getClassName() == null
+                        ? ""
+                        : nodo.getClassName()
+                                .toString()
+                                .toLowerCase(
+                                        java.util.Locale.ITALIAN
+                                );
+
+        return classe.contains("switch")
+                || classe.contains("togglebutton");
+    }
+
+    private Boolean leggiStatoToggle(
+            AccessibilityNodeInfo nodo) {
+
+        if (nodo == null) return null;
+
+        if (nodo.isCheckable()) {
+            return nodo.isChecked();
+        }
+
+        String stateDescription = "";
+
+        if (android.os.Build.VERSION.SDK_INT >= 30
+                && nodo.getStateDescription() != null) {
+
+            stateDescription =
+                    nodo.getStateDescription()
+                            .toString();
+        }
+
+        String stato =
+                normalizzaEtichettaToggle(
+                        (nodo.getText() == null
+                                ? ""
+                                : nodo.getText().toString())
+                                + " "
+                                + (nodo.getContentDescription() == null
+                                        ? ""
+                                        : nodo.getContentDescription()
+                                                .toString())
+                                + " "
+                                + stateDescription
+                );
+
+        if (stato.contains("spento")
+                || stato.contains("disattivato")
+                || stato.equals("off")
+                || stato.contains("nonattivo")) {
+
+            return false;
+        }
+
+        if (stato.contains("acceso")
+                || stato.contains("attivo")
+                || stato.equals("on")
+                || stato.contains("abilitato")) {
+
+            return true;
+        }
+
+        return null;
+    }
+
+    private String normalizzaEtichettaToggle(
+            String valore) {
+
+        if (valore == null) return "";
+
+        String s =
+                java.text.Normalizer.normalize(
+                        valore,
+                        java.text.Normalizer.Form.NFD
+                ).replaceAll(
+                        "\\p{M}+",
+                        ""
+                );
+
+        return s.toLowerCase(
+                        java.util.Locale.ITALIAN
+                )
+                .replaceAll(
+                        "[^\\p{L}\\p{N}]+",
+                        ""
+                )
+                .trim();
+    }
+
+    // ============================================================
+    // P4.2A - GENERIC UI ACTION RESOLVER
+    // Nessun target specifico hardcoded.
+    // ============================================================
+
+    public interface UiActionResultCallback {
+        void onResult(
+                boolean riuscito,
+                Boolean statoFinale,
+                String dettaglio
+        );
+    }
+
+    private static class UiCandidate {
+        AccessibilityNodeInfo nodo;
+        int score;
+
+        UiCandidate(
+                AccessibilityNodeInfo nodo,
+                int score) {
+            this.nodo = nodo;
+            this.score = score;
+        }
+    }
+
+    public void eseguiAzioneUIGenerica(
+            String verbo,
+            String target,
+            UiActionResultCallback callback) {
+
+        if (callback == null) return;
+
+        String v =
+                normalizzaEtichettaToggle(verbo);
+
+        String t =
+                normalizzaEtichettaToggle(target);
+
+        if (t.isEmpty()) {
+            callback.onResult(
+                    false,
+                    null,
+                    "target_mancante"
+            );
+            return;
+        }
+
+        boolean setOn =
+                v.equals("attiva")
+                || v.equals("accendi")
+                || v.equals("abilita");
+
+        boolean setOff =
+                v.equals("spegni")
+                || v.equals("disattiva")
+                || v.equals("disabilita")
+                || v.equals("chiudi");
+
+        boolean press =
+                v.equals("premi")
+                || v.equals("tocca")
+                || v.equals("seleziona")
+                || v.equals("apri");
+
+        if (!setOn && !setOff && !press) {
+            callback.onResult(
+                    false,
+                    null,
+                    "verbo_non_supportato"
+            );
+            return;
+        }
+
+        final Boolean desiderato =
+                setOn
+                        ? Boolean.TRUE
+                        : setOff
+                                ? Boolean.FALSE
+                                : null;
+
+        AccessibilityNodeInfo root =
+                getRootInActiveWindow();
+
+        if (root == null) {
+            callback.onResult(
+                    false,
+                    null,
+                    "root_non_disponibile"
+            );
+            return;
+        }
+
+        UiCandidate candidato =
+                trovaMigliorCandidatoUI(
+                        root,
+                        t,
+                        desiderato
+                );
+
+        if (candidato == null) {
+            callback.onResult(
+                    false,
+                    null,
+                    "target_non_trovato"
+            );
+            return;
+        }
+
+        AccessibilityNodeInfo nodoAzione =
+                risolviNodoAzioneUI(
+                        candidato.nodo,
+                        desiderato
+                );
+
+        if (nodoAzione == null) {
+            callback.onResult(
+                    false,
+                    null,
+                    "nodo_azione_non_trovato"
+            );
+            return;
+        }
+
+        Boolean statoPrima =
+                desiderato != null
+                        ? leggiStatoToggle(nodoAzione)
+                        : null;
+
+        Log.i(
+                TAG,
+                "P4 UI target="
+                        + target
+                        + " score="
+                        + candidato.score
+                        + " statoPrima="
+                        + statoPrima
+                        + " desiderato="
+                        + desiderato
+        );
+
+        if (desiderato != null
+                && statoPrima != null
+                && statoPrima.booleanValue()
+                == desiderato.booleanValue()) {
+
+            callback.onResult(
+                    true,
+                    statoPrima,
+                    "gia_nello_stato_richiesto"
+            );
+            return;
+        }
+
+        final String snapshotPrima =
+                ScreenSnapshot.acquisisci(root);
+
+        boolean cliccato =
+                AccessibilityUtils.click(
+                        nodoAzione
+                );
+
+        if (!cliccato
+                && nodoAzione != candidato.nodo) {
+
+            cliccato =
+                    AccessibilityUtils.click(
+                            candidato.nodo
+                    );
+        }
+
+        if (!cliccato) {
+            callback.onResult(
+                    false,
+                    statoPrima,
+                    "click_fallito"
+            );
+            return;
+        }
+
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()
+        ).postDelayed(
+                () -> verificaAzioneUIGenerica(
+                        t,
+                        desiderato,
+                        snapshotPrima,
+                        callback
+                ),
+                700L
+        );
+    }
+
+    private void verificaAzioneUIGenerica(
+            String target,
+            Boolean desiderato,
+            String snapshotPrima,
+            UiActionResultCallback callback) {
+
+        AccessibilityNodeInfo root =
+                getRootInActiveWindow();
+
+        if (root == null) {
+            callback.onResult(
+                    false,
+                    null,
+                    "root_post_click_non_disponibile"
+            );
+            return;
+        }
+
+        if (desiderato != null) {
+
+            UiCandidate candidato =
+                    trovaMigliorCandidatoUI(
+                            root,
+                            target,
+                            desiderato
+                    );
+
+            if (candidato == null) {
+                callback.onResult(
+                        false,
+                        null,
+                        "target_post_click_non_trovato"
+                );
+                return;
+            }
+
+            AccessibilityNodeInfo nodo =
+                    risolviNodoAzioneUI(
+                            candidato.nodo,
+                            desiderato
+                    );
+
+            Boolean statoDopo =
+                    leggiStatoToggle(nodo);
+
+            boolean ok =
+                    statoDopo != null
+                    && statoDopo.booleanValue()
+                    == desiderato.booleanValue();
+
+            callback.onResult(
+                    ok,
+                    statoDopo,
+                    ok
+                            ? "stato_verificato"
+                            : "stato_non_confermato"
+            );
+
+            return;
+        }
+
+        String snapshotDopo =
+                ScreenSnapshot.acquisisci(root);
+
+        boolean cambiata =
+                !snapshotPrima.equals(
+                        snapshotDopo
+                );
+
+        callback.onResult(
+                true,
+                null,
+                cambiata
+                        ? "ui_cambiata"
+                        : "click_accettato_non_verificato"
+        );
+    }
+
+    private UiCandidate trovaMigliorCandidatoUI(
+            AccessibilityNodeInfo root,
+            String target,
+            Boolean desiderato) {
+
+        UiCandidate migliore =
+                new UiCandidate(
+                        null,
+                        0
+                );
+
+        cercaCandidatoUI(
+                root,
+                target,
+                desiderato,
+                migliore
+        );
+
+        return migliore.nodo == null
+                ? null
+                : migliore;
+    }
+
+    private void cercaCandidatoUI(
+            AccessibilityNodeInfo nodo,
+            String target,
+            Boolean desiderato,
+            UiCandidate migliore) {
+
+        if (nodo == null) return;
+
+        if (nodo.isVisibleToUser()
+                && nodo.isEnabled()) {
+
+            int score =
+                    scoreNodoUI(
+                            nodo,
+                            target
+                    );
+
+            if (score > 0) {
+
+                if (nodo.isClickable()) {
+                    score += 10;
+                }
+
+                if (desiderato != null) {
+
+                    if (nodoEToggle(nodo)) {
+                        score += 40;
+
+                    } else if (
+                            trovaToggleAssociato(
+                                    nodo
+                            ) != null) {
+
+                        score += 30;
+                    }
+                }
+
+                if (score > migliore.score) {
+                    migliore.nodo = nodo;
+                    migliore.score = score;
+                }
+            }
+        }
+
+        for (int i = 0;
+                i < nodo.getChildCount();
+                i++) {
+
+            cercaCandidatoUI(
+                    nodo.getChild(i),
+                    target,
+                    desiderato,
+                    migliore
+            );
+        }
+    }
+
+    private int scoreNodoUI(
+            AccessibilityNodeInfo nodo,
+            String target) {
+
+        int score = 0;
+
+        score = Math.max(
+                score,
+                scoreCampoUI(
+                        nodo.getText(),
+                        target
+                )
+        );
+
+        score = Math.max(
+                score,
+                scoreCampoUI(
+                        nodo.getContentDescription(),
+                        target
+                )
+        );
+
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            score = Math.max(
+                    score,
+                    scoreCampoUI(
+                            nodo.getHintText(),
+                            target
+                    )
+            );
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            score = Math.max(
+                    score,
+                    scoreCampoUI(
+                            nodo.getStateDescription(),
+                            target
+                    )
+            );
+        }
+
+        return score;
+    }
+
+    private int scoreCampoUI(
+            CharSequence valore,
+            String target) {
+
+        if (valore == null) return 0;
+
+        String campo =
+                normalizzaEtichettaToggle(
+                        valore.toString()
+                );
+
+        if (campo.isEmpty()) return 0;
+
+        if (campo.equals(target)) {
+            return 100;
+        }
+
+        if (campo.contains(target)) {
+            return 50;
+        }
+
+        return 0;
+    }
+
+    private AccessibilityNodeInfo risolviNodoAzioneUI(
+            AccessibilityNodeInfo candidato,
+            Boolean desiderato) {
+
+        if (candidato == null) {
+            return null;
+        }
+
+        if (desiderato != null) {
+
+            if (nodoEToggle(candidato)) {
+                return candidato;
+            }
+
+            AccessibilityNodeInfo toggle =
+                    trovaToggleAssociato(
+                            candidato
+                    );
+
+            if (toggle != null) {
+                return toggle;
+            }
+        }
+
+        return candidato;
+    }
+
+    public static void apriAppStatic(Context context, String packageName) {
+        if (instance != null) {
+            instance.apriApp(packageName);
+        } else {
+            Intent intent = context.getPackageManager().getLaunchIntentForPackage(packageName);
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(intent);
+            }
+        }
+    }
+
+    public static void chiamaStatic(Context context, String numero) {
+        Intent intent = new Intent(Intent.ACTION_CALL);
+        intent.setData(android.net.Uri.parse("tel:" + numero));
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(intent);
+    }
+
+    public boolean cliccaPulsanteChiamata(boolean video) {
+        android.view.accessibility.AccessibilityNodeInfo radice = getRootInActiveWindow();
+        if (radice == null) return false;
+
+        String[] chiaviVideo = {"videochiamata", "video call", "video chiamata"};
+        String[] chiaviVoce = {"chiamata vocale", "voice call", "audio call", "chiama", "call"};
+
+        String[] chiavi = video ? chiaviVideo : chiaviVoce;
+
+        for (String chiave : chiavi) {
+            android.view.accessibility.AccessibilityNodeInfo trovato =
+                    cercaPerDescrizioneEscludendo(radice, chiave, video ? null : "video");
+            if (trovato != null) {
+                boolean risultato = AccessibilityUtils.click(trovato);
+                if (risultato) return true;
+            }
+        }
+        return false;
+    }
+
+    private android.view.accessibility.AccessibilityNodeInfo cercaPerDescrizioneEscludendo(
+            android.view.accessibility.AccessibilityNodeInfo nodo,
+            String chiave,
+            String daEscludere) {
+
+        if (nodo == null) return null;
+
+        CharSequence descrizione = nodo.getContentDescription();
+        if (descrizione != null) {
+            String testoDesc = descrizione.toString().toLowerCase(java.util.Locale.ITALIAN);
+            boolean contieneChiave = testoDesc.contains(chiave);
+            boolean contieneEsclusa = daEscludere != null && testoDesc.contains(daEscludere);
+
+            if (contieneChiave && !contieneEsclusa) {
+                return nodo;
+            }
+        }
+
+        for (int i = 0; i < nodo.getChildCount(); i++) {
+            android.view.accessibility.AccessibilityNodeInfo figlio = nodo.getChild(i);
+            android.view.accessibility.AccessibilityNodeInfo risultato =
+                    cercaPerDescrizioneEscludendo(figlio, chiave, daEscludere);
+            if (risultato != null) return risultato;
+        }
+
+        return null;
+    }
+
+    private android.view.accessibility.AccessibilityNodeInfo cercaPerDescrizione(
+            android.view.accessibility.AccessibilityNodeInfo nodo,
+            String chiave) {
+
+        if (nodo == null) return null;
+
+        CharSequence descrizione = nodo.getContentDescription();
+        if (descrizione != null &&
+                descrizione.toString().toLowerCase(java.util.Locale.ITALIAN).contains(chiave)) {
+            return nodo;
+        }
+
+        for (int i = 0; i < nodo.getChildCount(); i++) {
+            android.view.accessibility.AccessibilityNodeInfo figlio = nodo.getChild(i);
+            android.view.accessibility.AccessibilityNodeInfo risultato =
+                    cercaPerDescrizione(figlio, chiave);
+            if (risultato != null) return risultato;
+        }
+
+        return null;
+    }
+
+    private static String messaggioInAttesa = null;
+    private String nomeOriginaleAmbiguo = null;
+    private final java.util.ArrayList<String> contattiAmbigui =
+            new java.util.ArrayList<>();
+    private static String testoMessaggioAmbiguo = null;
+    private static String azioneAmbigua = null;
+    private static String appAmbigua = null;
+    private static String modalitaAmbigua = null;
+
+
+
+    public static void scriviStatic(Context context, String destinatario, String messaggio) {
+        Log.d("LisaAccessibility", "Scrivi a " + destinatario + ": " + messaggio);
+        messaggioInAttesa = messaggio;
+    }
+
+    private int distanzaLevenshtein(String a, String b) {
+        int[][] d = new int[a.length() + 1][b.length() + 1];
+        for (int i = 0; i <= a.length(); i++) d[i][0] = i;
+        for (int j = 0; j <= b.length(); j++) d[0][j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            for (int j = 1; j <= b.length(); j++) {
+                int costo = (a.charAt(i - 1) == b.charAt(j - 1)) ? 0 : 1;
+                d[i][j] = Math.min(
+                        Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1),
+                        d[i - 1][j - 1] + costo
+                );
+            }
+        }
+        return d[a.length()][b.length()];
+    }
+
+    /**
+     * Quando la ricerca esatta in rubrica non trova nulla (nome sentito
+     * male dal microfono, es. "jaro" invece di "Yaro"), confronta il nome
+     * con tutti i contatti della rubrica usando la distanza di Levenshtein
+     * e propone come ambiguita' quelli abbastanza simili.
+     */
+    private String cercaContattoFonetico(String query) {
+        String queryNorm = query.trim().toLowerCase(java.util.Locale.ITALIAN);
+        if (queryNorm.isEmpty()) return null;
+
+        java.util.ArrayList<String> tuttiContatti = new java.util.ArrayList<>();
+
+        try {
+            android.database.Cursor cursor = getContentResolver().query(
+                    android.provider.ContactsContract.Contacts.CONTENT_URI,
+                    new String[]{
+                            android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY
+                    },
+                    android.provider.ContactsContract.Contacts.HAS_PHONE_NUMBER + " > 0",
+                    null,
+                    null
+            );
+
+            if (cursor != null) {
+                int indice = cursor.getColumnIndex(
+                        android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY
+                );
+                while (cursor.moveToNext()) {
+                    if (indice >= 0) {
+                        String nome = cursor.getString(indice);
+                        if (nome != null && !nome.trim().isEmpty()) {
+                            tuttiContatti.add(nome.trim());
+                        }
+                    }
+                }
+                cursor.close();
+            }
+        } catch (Exception e) {
+            return null;
+        }
+
+        java.util.ArrayList<String> candidati = new java.util.ArrayList<>();
+
+        for (String nome : tuttiContatti) {
+            String primoNome = nome.split("\\s+")[0].toLowerCase(java.util.Locale.ITALIAN);
+            int distanza = distanzaLevenshtein(queryNorm, primoNome);
+
+            // Tollera 1 errore ogni 4 lettere circa (es. "jaro"/"yaro" = 1).
+            int sogliaMax = Math.max(1, primoNome.length() / 4);
+
+            if (distanza <= sogliaMax) {
+                candidati.add(nome);
+            }
+        }
+
+        if (candidati.isEmpty()) return null;
+
+        if (candidati.size() == 1) {
+            return candidati.get(0);
+        }
+
+        contattiAmbigui.clear();
+        contattiAmbigui.addAll(candidati);
+        return null;
+    }
+
+    private String risolviContattoRubrica(String richiesto) {
+        contattiAmbigui.clear();
+
+        if (richiesto == null || richiesto.trim().isEmpty())
+            return richiesto;
+
+        String query = richiesto.trim();
+        nomeOriginaleAmbiguo = query;
+
+        java.util.LinkedHashSet<String> trovati =
+                new java.util.LinkedHashSet<>();
+
+        try {
+            android.database.Cursor cursor =
+                    getContentResolver().query(
+                            android.provider.ContactsContract.Contacts.CONTENT_URI,
+                            new String[]{
+                                    android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY
+                            },
+                            android.provider.ContactsContract.Contacts.HAS_PHONE_NUMBER +
+                                    " > 0 AND " +
+                                    android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY +
+                                    " LIKE ?",
+                            new String[]{"%" + query + "%"},
+                            android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY +
+                                    " COLLATE NOCASE ASC"
+                    );
+
+            if (cursor != null) {
+                int indice = cursor.getColumnIndex(
+                        android.provider.ContactsContract.Contacts.DISPLAY_NAME_PRIMARY
+                );
+
+                while (cursor.moveToNext()) {
+                    if (indice >= 0) {
+                        String nome = cursor.getString(indice);
+                        if (nome != null && !nome.trim().isEmpty())
+                            trovati.add(nome.trim());
+                    }
+                }
+
+                cursor.close();
+            }
+        } catch (Exception e) {
+            return query;
+        }
+
+        if (trovati.isEmpty()) {
+            String candidatoFonetico = cercaContattoFonetico(query);
+            if (candidatoFonetico != null) {
+                return candidatoFonetico;
+            }
+            return query;
+        }
+
+        java.util.ArrayList<String> preferiti =
+                new java.util.ArrayList<>();
+
+        String q = query.toLowerCase(java.util.Locale.ITALIAN);
+
+        for (String nome : trovati) {
+            String n = nome.toLowerCase(java.util.Locale.ITALIAN);
+
+            if (n.equals(q) || n.startsWith(q + " "))
+                preferiti.add(nome);
+        }
+
+        // Raggruppa per nome "pulito" (senza emoji/simboli): evita falsa
+        // ambiguita' quando lo stesso contatto e' salvato piu' volte con
+        // varianti di sole emoji.
+        java.util.List<String> daValutare =
+                preferiti.isEmpty() ? new java.util.ArrayList<>(trovati) : preferiti;
+
+        java.util.LinkedHashMap<String, String> perNomePulito =
+                new java.util.LinkedHashMap<>();
+
+        for (String nome : daValutare) {
+            String pulito = nome.replaceAll("[^\\p{L}\\p{N}\\s]", "")
+                                 .trim()
+                                 .toLowerCase(java.util.Locale.ITALIAN);
+
+            String esistente = perNomePulito.get(pulito);
+            if (esistente == null || nome.length() < esistente.length()) {
+                perNomePulito.put(pulito, nome);
+            }
+        }
+
+        if (perNomePulito.size() == 1) {
+            return perNomePulito.values().iterator().next();
+        }
+
+        contattiAmbigui.addAll(perNomePulito.values());
+
+        return null;
+    }
+
+    public String domandaContattoAmbiguo() {
+        if (contattiAmbigui.isEmpty())
+            return null;
+
+        StringBuilder testo =
+                new StringBuilder("Ho trovato ");
+
+        int massimo = Math.min(3, contattiAmbigui.size());
+
+        for (int i = 0; i < massimo; i++) {
+            if (i > 0) testo.append(", ");
+            testo.append(contattiAmbigui.get(i));
+        }
+
+        testo.append(". Quale vuoi?");
+        return testo.toString();
+    }
+
+    private String trovaNumeroContattoEsatto(String nome) {
+
+        if (nome == null || nome.trim().isEmpty())
+            return null;
+
+        android.database.Cursor cursor = null;
+        String primoNumero = null;
+
+        try {
+            cursor = getContentResolver().query(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{
+                            android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                            android.provider.ContactsContract.CommonDataKinds.Phone.TYPE
+                    },
+                    android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                            + " = ?",
+                    new String[]{nome.trim()},
+                    null
+            );
+
+            if (cursor == null)
+                return null;
+
+            int indiceNumero = cursor.getColumnIndex(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+            );
+
+            int indiceTipo = cursor.getColumnIndex(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.TYPE
+            );
+
+            while (cursor.moveToNext()) {
+
+                if (indiceNumero < 0)
+                    continue;
+
+                String numero = cursor.getString(indiceNumero);
+
+                if (numero == null || numero.trim().isEmpty())
+                    continue;
+
+                if (primoNumero == null)
+                    primoNumero = numero.trim();
+
+                if (indiceTipo >= 0) {
+                    int tipo = cursor.getInt(indiceTipo);
+
+                    if (tipo ==
+                            android.provider.ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE) {
+                        return numero.trim();
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            android.util.Log.e(
+                    "LisaAccessibility",
+                    "Errore lettura numero contatto",
+                    e
+            );
+
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        return primoNumero;
+    }
+
+
+    private String normalizzaNumeroWhatsApp(String numero) {
+
+        if (numero == null)
+            return null;
+
+        String iso = java.util.Locale.getDefault().getCountry();
+
+        if (iso == null || iso.trim().isEmpty())
+            iso = "IT";
+
+        String e164 =
+                android.telephony.PhoneNumberUtils.formatNumberToE164(
+                        numero,
+                        iso
+                );
+
+        String pulito;
+
+        if (e164 != null && !e164.trim().isEmpty()) {
+            pulito = e164.replaceAll("[^0-9]", "");
+        } else {
+            pulito = numero.replaceAll("[^0-9]", "");
+
+            if (pulito.startsWith("00"))
+                pulito = pulito.substring(2);
+        }
+
+        return pulito.isEmpty() ? null : pulito;
+    }
+
+
+    private boolean apriChatWhatsApp(
+            String numero,
+            String messaggio) {
+
+        String numeroWhatsapp =
+                normalizzaNumeroWhatsApp(numero);
+
+        if (numeroWhatsapp == null)
+            return false;
+
+        String url =
+                "https://wa.me/"
+                        + numeroWhatsapp;
+
+        if (messaggio != null
+                && !messaggio.trim().isEmpty()) {
+
+            url += "?text="
+                    + android.net.Uri.encode(messaggio);
+        }
+
+        try {
+            android.content.Intent intent =
+                    new android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(url)
+                    );
+
+            intent.setPackage("com.whatsapp");
+
+            intent.addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+            );
+
+            startActivity(intent);
+
+            return true;
+
+        } catch (Exception e) {
+
+            android.util.Log.e(
+                    "LisaAccessibility",
+                    "Impossibile aprire chat WhatsApp",
+                    e
+            );
+
+            return false;
+        }
+    }
+
+
+    private volatile long ultimaChiamataMessaggio = 0;
+    private volatile long ultimaChiamataTelefono = 0;
+    private volatile boolean chiamataDuplicataIgnorata = false;
+
+    public boolean isChiamataDuplicataIgnorata() {
+        return chiamataDuplicataIgnorata;
+    }
+
+    private final android.os.Handler handlerAttesa =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    public boolean cercaContattoEChiama(String contatto, String appChiamata, String modalitaChiamata) {
+
+        long ora = System.currentTimeMillis();
+        if (ora - ultimaChiamataTelefono < 2000) {
+            android.util.Log.i("LisaAccessibility", "Chiamata duplicata ignorata (chiama)");
+            chiamataDuplicataIgnorata = true;
+            return false;
+        }
+        chiamataDuplicataIgnorata = false;
+        ultimaChiamataTelefono = ora;
+
+        String contattoRisolto = risolviContattoRubrica(contatto);
+
+        if (contattoRisolto == null) {
+            azioneAmbigua = "chiama";
+            appAmbigua = appChiamata;
+            modalitaAmbigua = modalitaChiamata;
+            android.util.Log.i(
+                    "LisaAccessibility",
+                    "Contatto ambiguo (chiamata): " + contatto
+            );
+            return false;
+        }
+
+        String numero = trovaNumeroContattoEsatto(contattoRisolto);
+
+        if (numero == null) {
+            android.util.Log.e(
+                    "LisaAccessibility",
+                    "Numero non trovato per: " + contattoRisolto
+            );
+            return false;
+        }
+
+        if ("whatsapp".equals(appChiamata)) {
+            boolean apertaChat = apriChatWhatsApp(numero, null);
+            if (!apertaChat) return false;
+
+            final boolean videoFinale = "video".equals(modalitaChiamata);
+
+            handlerAttesa.postDelayed(() -> {
+                cliccaPulsanteChiamata(videoFinale);
+            }, 2000);
+
+            return true;
+        }
+
+        chiamaStatic(this, numero);
+        return true;
+    }
+
+    public boolean cercaContattoEInvia(
+            String contatto,
+            String messaggio,
+            String app,
+            String pacchetto) {
+
+        String canale = app == null
+                ? ""
+                : app.trim().toLowerCase(java.util.Locale.ITALIAN);
+
+        String pkg = pacchetto == null
+                ? ""
+                : pacchetto.trim();
+
+        // WhatsApp resta sul flusso stabile già esistente.
+        if (canale.isEmpty()
+                || "whatsapp".equals(canale)
+                || "com.whatsapp".equals(pkg)) {
+            return cercaContattoEScrivi(contatto, messaggio);
+        }
+
+        String contattoRisolto = risolviContattoRubrica(contatto);
+
+        if (contattoRisolto == null) {
+            testoMessaggioAmbiguo = messaggio;
+            azioneAmbigua = "messaggio";
+            appAmbigua = canale;
+            return false;
+        }
+
+        String numero = trovaNumeroContattoEsatto(contattoRisolto);
+
+        if ("sms".equals(canale)) {
+            if (numero == null || numero.trim().isEmpty()) return false;
+
+            try {
+                android.content.Intent intent =
+                        new android.content.Intent(
+                                android.content.Intent.ACTION_SENDTO
+                        );
+
+                intent.setData(
+                        android.net.Uri.parse(
+                                "smsto:" + android.net.Uri.encode(numero)
+                        )
+                );
+
+                intent.putExtra("sms_body", messaggio);
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                startActivity(intent);
+
+                messaggioInAttesa = messaggio;
+
+                Log.i(
+                        "LisaAccessibility",
+                        "Dispatcher messaggio: SMS -> " + contattoRisolto
+                );
+
+                return true;
+
+            } catch (Exception e) {
+                Log.e("LisaAccessibility", "Errore apertura SMS", e);
+                return false;
+            }
+        }
+
+        if ("telegram".equals(canale)) {
+            if (numero == null || numero.trim().isEmpty()) return false;
+
+            try {
+                String numeroPulito =
+                        numero.replaceAll("[^0-9+]", "");
+
+                String uri =
+                        "tg://resolve?phone="
+                                + android.net.Uri.encode(numeroPulito)
+                                + "&text="
+                                + android.net.Uri.encode(messaggio);
+
+                android.content.Intent intent =
+                        new android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(uri)
+                        );
+
+                intent.setPackage("org.telegram.messenger");
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                startActivity(intent);
+
+                messaggioInAttesa = messaggio;
+
+                Log.i(
+                        "LisaAccessibility",
+                        "Dispatcher messaggio: Telegram -> " + contattoRisolto
+                );
+
+                return true;
+
+            } catch (Exception e) {
+                Log.e("LisaAccessibility", "Errore apertura Telegram", e);
+                return false;
+            }
+        }
+
+        if ("email".equals(canale) || "mail".equals(canale)) {
+            String email = trovaEmailContattoEsatto(contattoRisolto);
+
+            if (email == null || email.trim().isEmpty()) return false;
+
+            try {
+                android.content.Intent intent =
+                        new android.content.Intent(
+                                android.content.Intent.ACTION_SENDTO
+                        );
+
+                intent.setData(
+                        android.net.Uri.parse(
+                                "mailto:" + android.net.Uri.encode(email)
+                        )
+                );
+
+                intent.putExtra(
+                        android.content.Intent.EXTRA_TEXT,
+                        messaggio
+                );
+
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                startActivity(intent);
+
+                messaggioInAttesa = messaggio;
+
+                Log.i(
+                        "LisaAccessibility",
+                        "Dispatcher messaggio: EMAIL -> " + contattoRisolto
+                );
+
+                return true;
+
+            } catch (Exception e) {
+                Log.e("LisaAccessibility", "Errore apertura email", e);
+                return false;
+            }
+        }
+
+        Log.w(
+                "LisaAccessibility",
+                "Canale messaggio non ancora supportato: "
+                        + canale
+                        + " pacchetto="
+                        + pkg
+        );
+
+        return false;
+    }
+
+    private String trovaEmailContattoEsatto(String nome) {
+        android.database.Cursor cursor = null;
+
+        try {
+            cursor = getContentResolver().query(
+                    android.provider.ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+                    new String[] {
+                            android.provider.ContactsContract.CommonDataKinds.Email.ADDRESS,
+                            android.provider.ContactsContract.CommonDataKinds.Email.DISPLAY_NAME
+                    },
+                    android.provider.ContactsContract.CommonDataKinds.Email.DISPLAY_NAME
+                            + " = ? COLLATE NOCASE",
+                    new String[] { nome },
+                    null
+            );
+
+            if (cursor != null && cursor.moveToFirst()) {
+                int indice = cursor.getColumnIndex(
+                        android.provider.ContactsContract.CommonDataKinds.Email.ADDRESS
+                );
+
+                if (indice >= 0) {
+                    String email = cursor.getString(indice);
+                    if (email != null && !email.trim().isEmpty()) {
+                        return email.trim();
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            Log.e(
+                    "LisaAccessibility",
+                    "Errore ricerca email per " + nome,
+                    e
+            );
+
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+
+        return null;
+    }
+
+    public boolean cercaContattoEScrivi(
+            String contatto,
+            String messaggio) {
+
+        long ora = System.currentTimeMillis();
+        if (ora - ultimaChiamataMessaggio < 2000) {
+            android.util.Log.i("LisaAccessibility", "Chiamata duplicata ignorata");
+            return false;
+        }
+        ultimaChiamataMessaggio = ora;
+
+        /*
+         * PRIMA risolviamo il contatto dalla rubrica.
+         *
+         * Se esistono più Leonardo, il metodo già presente
+         * riempie contattiAmbigui e restituisce null.
+         * LisaCommandReceiver farà quindi la domanda:
+         * "Leonardo Astorino o Leonardo Fusi?"
+         */
+        String contattoRisolto =
+                risolviContattoRubrica(contatto);
+
+        if (contattoRisolto == null) {
+            testoMessaggioAmbiguo = messaggio;
+            azioneAmbigua = "messaggio";
+            android.util.Log.i(
+                    "LisaAccessibility",
+                    "Contatto ambiguo: " + contatto
+            );
+            return false;
+        }
+
+        String numero =
+                trovaNumeroContattoEsatto(
+                        contattoRisolto
+                );
+
+        if (numero == null) {
+            android.util.Log.e(
+                    "LisaAccessibility",
+                    "Numero non trovato per: "
+                            + contattoRisolto
+            );
+            return false;
+        }
+
+        /*
+         * Il messaggio viene conservato perché
+         * confermaInvio() deve inviarlo soltanto
+         * dopo la conferma vocale.
+         */
+        messaggioInAttesa = messaggio;
+
+        boolean aperta =
+                apriChatWhatsApp(
+                        numero,
+                        messaggio
+                );
+
+        if (aperta) {
+            android.util.Log.i(
+                    "LisaAccessibility",
+                    "WhatsApp diretto: "
+                            + contattoRisolto
+            );
+        }
+
+        return aperta;
+    }
+
+
+    public void ascoltaConfermaInvio() {
+        // La conferma usa il microfono principale di LisaVoiceService.
+        // NON viene creato un secondo SpeechRecognizer.
+        android.util.Log.i("LisaAccessibility", "Conferma invio: ritorno al microfono principale Lisa");
+        return;
+    }
+
+    private static boolean inAttesaNuovoTesto = false;
+
+    public void annullaInvio() {
+        messaggioInAttesa = null;
+        inAttesaNuovoTesto = false;
+        Log.i("LisaAccessibility", "Invio annullato dalla voce");
+    }
+
+    public void chiediNuovoTesto() {
+        inAttesaNuovoTesto = true;
+        Log.i("LisaAccessibility", "In attesa del nuovo testo da scrivere");
+    }
+
+    public boolean inAttesaDiNuovoTesto() {
+        return inAttesaNuovoTesto;
+    }
+
+    public boolean haMessaggioInAttesa() {
+        return messaggioInAttesa != null
+                && !messaggioInAttesa.trim().isEmpty();
+    }
+
+    /**
+     * Sostituisce il testo gia' scritto nel campo messaggio (es. WhatsApp)
+     * con uno nuovo, senza riaprire la chat. ACTION_SET_TEXT sovrascrive
+     * sempre il contenuto esistente, quindi basta richiamare scriviTesto().
+     */
+    public boolean riscriviMessaggio(String nuovoTesto) {
+        inAttesaNuovoTesto = false;
+
+        boolean scritto = scriviTesto(nuovoTesto);
+        if (scritto) {
+            messaggioInAttesa = nuovoTesto;
+        }
+        return scritto;
+    }
+
+    public boolean cancellaTestoCorrente() {
+        boolean cancellato = scriviTesto("");
+
+        if (cancellato) {
+            // Non deve essere possibile inviare accidentalmente
+            // il vecchio testo dopo averlo cancellato.
+            messaggioInAttesa = null;
+
+            // Rimaniamo in modalità riscrittura:
+            // Lisa aspetta il nuovo contenuto.
+            inAttesaNuovoTesto = true;
+
+            Log.i(
+                    "LisaAccessibility",
+                    "Campo testo cancellato; attesa nuovo testo attiva"
+            );
+        }
+
+        return cancellato;
+    }
+
+    public boolean confermaInvio() {
+        if (messaggioInAttesa == null || messaggioInAttesa.trim().isEmpty())
+            return false;
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return false;
+
+        AccessibilityNodeInfo pulsanteInvia =
+                AccessibilityUtils.trovaPerTesto(root, "Invia");
+
+        if (pulsanteInvia == null) return false;
+
+        boolean inviato = AccessibilityUtils.click(pulsanteInvia);
+
+        if (inviato) {
+            messaggioInAttesa = null;
+        }
+
+        return inviato;
+    }
+
+    public boolean scriviTesto(String testo) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return false;
+
+        AccessibilityNodeInfo campo =
+            AccessibilityUtils.trovaCampoTesto(root);
+
+        return AccessibilityUtils.scrivi(campo, testo);
+    }
+
+    public boolean scorriAvanti() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        return root != null && AccessibilityUtils.scorri(root, true);
+    }
+
+    public boolean scorriIndietro() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        return root != null && AccessibilityUtils.scorri(root, false);
+    }
+
+    
+    public boolean inAttesaSceltaContatto() {
+        return !contattiAmbigui.isEmpty();
+    }
+
+    private void insegnaContattoAppreso(String nomeTrovato) {
+        String sentito = nomeOriginaleAmbiguo;
+        if (sentito == null || sentito.trim().isEmpty() || nomeTrovato == null) return;
+
+        final String sentitoFinale = sentito;
+        final String esattoFinale = nomeTrovato;
+
+        new Thread(() -> {
+            try {
+                java.net.URL url = new java.net.URL("http://127.0.0.1:5000/api/impara_contatto");
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+
+                org.json.JSONObject corpo = new org.json.JSONObject();
+                corpo.put("sentito", sentitoFinale);
+                corpo.put("esatto", esattoFinale);
+
+                byte[] dati = corpo.toString().getBytes("UTF-8");
+                conn.getOutputStream().write(dati);
+                conn.getInputStream().close();
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }, "Lisa-Apprendimento").start();
+    }
+
+    public String risolviSceltaContatto(String scelta) {
+        if (contattiAmbigui.isEmpty() || scelta == null) return null;
+        String sceltaNorm = scelta.trim().toLowerCase(java.util.Locale.ITALIAN);
+
+        for (String nome : contattiAmbigui) {
+            String nomeNorm = nome.toLowerCase(java.util.Locale.ITALIAN);
+            if (nomeNorm.contains(sceltaNorm) || sceltaNorm.contains(nomeNorm)) {
+                insegnaContattoAppreso(nome);
+                return nome;
+            }
+        }
+
+        // Tolleranza per errori di riconoscimento vocale
+        // (es. "Astorino" sentito come "storino", perde la prima lettera).
+        for (String nome : contattiAmbigui) {
+            String nomeNorm = nome.toLowerCase(java.util.Locale.ITALIAN);
+            for (String parola : nomeNorm.split("\\s+")) {
+                if (parola.length() < 4) continue;
+                String senzaPrimaLettera = parola.substring(1);
+                if (sceltaNorm.contains(parola) ||
+                        sceltaNorm.contains(senzaPrimaLettera)) {
+                    insegnaContattoAppreso(nome);
+                    return nome;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    public String getTestoMessaggioAmbiguo() {
+        return testoMessaggioAmbiguo;
+    }
+
+    public String getAzioneAmbigua() {
+        return azioneAmbigua;
+    }
+
+    public String getAppAmbigua() {
+        return appAmbigua;
+    }
+
+    public String getModalitaAmbigua() {
+        return modalitaAmbigua;
+    }
+
+    public void pulisciAmbiguita() {
+        contattiAmbigui.clear();
+        testoMessaggioAmbiguo = null;
+        azioneAmbigua = null;
+        appAmbigua = null;
+        modalitaAmbigua = null;
+    }
+
+public static LisaAccessibilityService getInstance() { return instance; }
+
+    public static ThermalSafetyMonitor getThermalSafetyMonitor() {
+
+        LisaAccessibilityService servizio = instance;
+
+        return servizio != null
+                ? servizio.thermalSafetyMonitor
+                : null;
+    }
+
+    public void apriAppPerNome(String nomeApp) { AppFinder.apriAppPerNome(this, nomeApp); }
+
+}
