@@ -140,6 +140,7 @@ public class LisaSettingsActivity extends LisaBaseActivity {
             @Override
             public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
                 getSharedPreferences("lisa_ui", MODE_PRIVATE).edit().putBoolean("lisa_pad_attivo", isChecked).apply();
+            if (isChecked) { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock(); } else { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().nascondiDock(); }
                 if (isChecked) {
                     startActivity(new android.content.Intent(LisaSettingsActivity.this, LisaPadSettingsActivity.class));
                 }
