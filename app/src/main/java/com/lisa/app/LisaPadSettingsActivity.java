@@ -259,6 +259,15 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
             final int index = i;
             rb.setOnClickListener(v -> {
                 prefs.edit().putString(chiavePref, valori[index]).apply();
+                if ("pad_posizione".equals(chiavePref)) {
+                    String lato = valori[index];
+                    if ("destra".equals(lato)) lato = "dx";
+                    if ("sinistra".equals(lato)) lato = "sx";
+                    if (LisaAccessibilityService.getInstance() != null) {
+                        LisaAccessibilityService.getInstance().setDockLato(lato);
+                        LisaAccessibilityService.getInstance().mostraDock();
+                    }
+                }
                 dialog.dismiss();
             });
             

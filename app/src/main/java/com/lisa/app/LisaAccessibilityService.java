@@ -128,6 +128,8 @@ public class LisaAccessibilityService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        servizioAttivo = true;
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> mostraDock(), 1500);
         instance = this;
         // 🟢 Aggancio motore gesture unico
         LisaGestureEngine.init(this);
