@@ -14,6 +14,9 @@ import android.widget.RadioButton;
 
 public class LisaSettingsActivity extends LisaBaseActivity {
 
+    private android.widget.Switch swPad;
+    private boolean ignoraSwitch = false;
+
     private int dp(int valore) {
         return Math.round(
                 valore * getResources().getDisplayMetrics().density
@@ -133,17 +136,15 @@ public class LisaSettingsActivity extends LisaBaseActivity {
                 startActivity(new android.content.Intent(LisaSettingsActivity.this, LisaPadSettingsActivity.class));
             }
         });
-        android.widget.Switch swPad = new android.widget.Switch(this);
+        swPad = new android.widget.Switch(this);
         boolean padAttivo = getSharedPreferences("lisa_ui", MODE_PRIVATE).getBoolean("lisa_pad_attivo", false);
         swPad.setChecked(padAttivo);
         swPad.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                if (ignoraSwitch) return;
                 getSharedPreferences("lisa_ui", MODE_PRIVATE).edit().putBoolean("lisa_pad_attivo", isChecked).apply();
-            if (isChecked) { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock(); } else { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().nascondiDock(); }
-                if (isChecked) {
-                    startActivity(new android.content.Intent(LisaSettingsActivity.this, LisaPadSettingsActivity.class));
-                }
+                if (isChecked) { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock(); } else { if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().nascondiDock(); }
             }
         });
         padRow.addView(swPad);
@@ -155,6 +156,15 @@ public class LisaSettingsActivity extends LisaBaseActivity {
         
 
         setContentView(scrollView);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (swPad == null) return;
+        ignoraSwitch = true;
+        swPad.setChecked(getSharedPreferences("lisa_ui", MODE_PRIVATE).getBoolean("lisa_pad_attivo", false));
+        ignoraSwitch = false;
     }
 
     private void aggiungiSezioneMotoreAsr(LinearLayout layout) {

@@ -83,6 +83,7 @@ public final class LisaDockView {
                 PixelFormat.TRANSLUCENT);
 
         String lato = leggiLato();
+        creaPulsanti();
         applicaGravity(lato);
 
         try {
@@ -107,6 +108,7 @@ public final class LisaDockView {
     }
 
     private void creaPulsanti() {
+        root.removeAllViews();
         nav("⏺️", "Home", LisaCapabilitySystem.Cap.NAV_HOME);
         navRuotata("⏏️", "Indietro", LisaCapabilitySystem.Cap.NAV_BACK, -90f);
         nav("⏹️", "Recenti", LisaCapabilitySystem.Cap.NAV_RECENTS);
@@ -127,25 +129,41 @@ public final class LisaDockView {
         screenshot("📸", "Screenshot");
         overlay("⊞", "Griglia");
 
+        String _modo = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_modello", "fissa");
+        if ("raggruppata".equals(_modo)) {
+            java.util.List<android.view.View> _children = new java.util.ArrayList<>();
+            while (root.getChildCount() > 0) { _children.add(root.getChildAt(0)); root.removeViewAt(0); }
+            root.setOrientation(LinearLayout.VERTICAL);
+            for (int _r = 0; _r < 4; _r++) {
+                LinearLayout _row = new LinearLayout(ctx);
+                _row.setOrientation(LinearLayout.HORIZONTAL);
+                _row.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+                for (int _c = 0; _c < 4; _c++) {
+                    int _idx = _r * 4 + _c;
+                    if (_idx < _children.size()) _row.addView(_children.get(_idx));
+                }
+                root.addView(_row);
+            }
+        }
     }
 
     private void navRuotata(String icona, String descrizione,
                             final LisaCapabilitySystem.Cap cap,
                             final float gradi) {
         FrameLayout frame = new FrameLayout(ctx);
-        int size = dp(dimPulsanteDp);
+        int size = dp(dimPulsanteDp - 2);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(size, size);
-        p.setMargins(0, 0, 0, 0);
+        p.setMargins(dp(1), dp(1), dp(1), dp(1));
         frame.setLayoutParams(p);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x00000000);
+        bg.setColor(0xFFFFFFFF);
         bg.setCornerRadius(0);
-        bg.setStroke(dp(1), 0x00000000);
+        bg.setStroke(dp(1), 0xFF000000);
         frame.setBackground(bg);
         TextView tv = new TextView(ctx);
         tv.setText(icona);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                dp(dimPulsanteDp) * 0.60f);
+                dp(dimPulsanteDp - 2) * 0.60f);
         tv.setIncludeFontPadding(false);
         tv.setTextColor(0xFF202020);
         tv.setGravity(Gravity.CENTER);
@@ -220,22 +238,22 @@ public final class LisaDockView {
         b.setText(testo);
         b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                dp(dimPulsanteDp) * 0.60f);
+                dp(dimPulsanteDp - 2) * 0.60f);
         b.setIncludeFontPadding(false);
         b.setGravity(android.view.Gravity.CENTER);
         b.setPadding(0, 0, 0, 0);
         b.setContentDescription(descrizione);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x00000000);
+        bg.setColor(0xFFFFFFFF);
         bg.setCornerRadius(0);
-        bg.setStroke(dp(1), 0x00000000);
+        bg.setStroke(dp(1), 0xFF000000);
         b.setBackground(bg);
         b.setForeground(null);
         b.setStateListAnimator(null);
         b.setTextColor(0xFF202020);
-        int size = dp(dimPulsanteDp);
+        int size = dp(dimPulsanteDp - 2);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(size, size);
-        p.setMargins(0, 0, 0, 0);
+        p.setMargins(dp(1), dp(1), dp(1), dp(1));
         b.setLayoutParams(p);
         if (azione != null) {
             b.setOnClickListener(new View.OnClickListener() {
@@ -287,21 +305,69 @@ public final class LisaDockView {
             return;
         }
 
-        if ("dx".equals(lato)) {
-            lp.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+        String _m = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_modello", "fissa");
+        String _o = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_orientamento", "orizzontale");
+        boolean _isRa = "raggruppata".equals(_m);
+        boolean _isFl = "fluttuante".equals(_m);
+        boolean _isFlVert = _isFl && "verticale".equals(_o);
+        boolean _isFlOr = _isFl && !_isFlVert;
+        if (_isRa || _isFlVert) {
             root.setOrientation(LinearLayout.VERTICAL);
-        } else if ("alto".equals(lato)) {
-            lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            root.setOrientation(LinearLayout.HORIZONTAL);
-        } else if ("basso".equals(lato)) {
-            lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        } else if (_isFlOr) {
             root.setOrientation(LinearLayout.HORIZONTAL);
         } else {
-            lp.gravity = Gravity.LEFT | Gravity.CENTER_VERTICAL;
-            root.setOrientation(LinearLayout.VERTICAL);
+            if ("alto".equals(lato) || "basso".equals(lato)) root.setOrientation(LinearLayout.HORIZONTAL);
+            else root.setOrientation(LinearLayout.VERTICAL);
         }
-        lp.x = 0;
-        lp.y = 0;
+        if (_isRa) {
+            lp.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+            lp.x = dp(16);
+            lp.y = 0;
+        } else if (_isFlVert) {
+            lp.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+            lp.x = dp(80);
+            lp.y = 0;
+        } else if (_isFlOr) {
+            lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            lp.x = 0;
+            lp.y = dp(100);
+        } else {
+            if ("dx".equals(lato)) lp.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
+            else if ("alto".equals(lato)) lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            else if ("basso".equals(lato)) lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            else lp.gravity = Gravity.LEFT | Gravity.CENTER_VERTICAL;
+            lp.x = 0;
+            lp.y = 0;
+        }
+
+        boolean isOrizzontale = "alto".equals(lato) || "basso".equals(lato);
+        boolean isTargetOrizzontale = _isFlOr || ("fissa".equals(_m) && isOrizzontale);
+
+        if (_isRa) {
+            lp.width = dp(dimPulsanteDp * 4);
+            lp.height = dp(dimPulsanteDp * 4);
+        } else if (_isFlVert) {
+            lp.width = dp(dimPulsanteDp);
+            lp.height = dp(dimPulsanteDp * 16);
+        } else if (isTargetOrizzontale) {
+            lp.width = dp(dimPulsanteDp * 16);
+            lp.height = dp(dimPulsanteDp);
+        } else {
+            lp.width = WindowManager.LayoutParams.WRAP_CONTENT;
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        }
+
+        if (isTargetOrizzontale) {
+            root.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            root.setWeightSum(16f);
+            for (int i = 0; i < root.getChildCount(); i++) {
+                android.view.View child = root.getChildAt(i);
+                LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(dimPulsanteDp - 2), 1f);
+                lp2.setMargins(dp(1), dp(1), dp(1), dp(1));
+                lp2.gravity = android.view.Gravity.CENTER_VERTICAL;
+                child.setLayoutParams(lp2);
+            }
+        }
 
         if (visibile && wm != null) {
             try {
@@ -329,14 +395,24 @@ public final class LisaDockView {
         // Normal e Big: valori da definire con te, non ancora fissati.
         int fattorePct = 100;
         dim = dim * fattorePct / 100;
-        dimPulsanteDp = Math.max(30, Math.min(85, dim));
+        dimPulsanteDp = 40;
 
-        root.setMinimumWidth(dp(orizzontale
-                ? dimPulsanteDp * nPulsanti
-                : dimPulsanteDp));
-        root.setMinimumHeight(dp(orizzontale
-                ? dimPulsanteDp
-                : dimPulsanteDp * nPulsanti));
+        String _md2 = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_modello", "fissa");
+        String _omd2 = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_orientamento", "orizzontale");
+        if ("raggruppata".equals(_md2)) {
+            int _side = dimPulsanteDp * 4;
+            root.setMinimumWidth(dp(_side));
+            root.setMinimumHeight(dp(_side));
+        } else if ("fluttuante".equals(_md2) && "verticale".equals(_omd2)) {
+            root.setMinimumWidth(dp(dimPulsanteDp));
+            root.setMinimumHeight(dp(dimPulsanteDp * nPulsanti));
+        } else if ("fluttuante".equals(_md2)) {
+            root.setMinimumWidth(dp(dimPulsanteDp * nPulsanti));
+            root.setMinimumHeight(dp(dimPulsanteDp));
+        } else {
+            root.setMinimumWidth(dp(orizzontale ? dimPulsanteDp * nPulsanti : dimPulsanteDp));
+            root.setMinimumHeight(dp(orizzontale ? dimPulsanteDp : dimPulsanteDp * nPulsanti));
+        }
     }
 
     private int dp(int v) {

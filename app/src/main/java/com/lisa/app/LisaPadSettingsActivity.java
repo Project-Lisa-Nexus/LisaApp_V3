@@ -185,6 +185,7 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
         rbFissa.setOnClickListener(v -> {
             radioGroupModello.check(1001);
             prefs.edit().putString("pad_modello", "fissa").apply();
+            if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock();
             if (!popupAperto) mostraPopup("Posizione", "pad_posizione", "sinistra", 
                 new String[]{"Destra", "Sinistra", "Alto", "Basso"}, 
                 new String[]{"destra", "sinistra", "alto", "basso"}, 2001);
@@ -193,14 +194,16 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
         rbFluttuante.setOnClickListener(v -> {
             radioGroupModello.check(1002);
             prefs.edit().putString("pad_modello", "fluttuante").apply();
-            if (!popupAperto) mostraPopup("Orientamento", "pad_orientamento", "orizzontale", 
-                new String[]{"Orizzontale", "Verticale"}, 
+            if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock();
+            if (!popupAperto) mostraPopup("Orientamento", "pad_orientamento", "orizzontale",
+                new String[]{"Orizzontale", "Verticale"},
                 new String[]{"orizzontale", "verticale"}, 3001);
         });
 
         rbRaggruppata.setOnClickListener(v -> {
             radioGroupModello.check(1003);
             prefs.edit().putString("pad_modello", "raggruppata").apply();
+            if (LisaAccessibilityService.getInstance() != null) LisaAccessibilityService.getInstance().mostraDock();
         });
 
         scrollView.addView(layout);
@@ -260,11 +263,18 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
             rb.setOnClickListener(v -> {
                 prefs.edit().putString(chiavePref, valori[index]).apply();
                 if ("pad_posizione".equals(chiavePref)) {
+                    getSharedPreferences("lisa_ui", MODE_PRIVATE).edit().putBoolean("lisa_pad_attivo", true).apply();
                     String lato = valori[index];
                     if ("destra".equals(lato)) lato = "dx";
                     if ("sinistra".equals(lato)) lato = "sx";
                     if (LisaAccessibilityService.getInstance() != null) {
                         LisaAccessibilityService.getInstance().setDockLato(lato);
+                        LisaAccessibilityService.getInstance().mostraDock();
+                    }
+                } else if ("pad_orientamento".equals(chiavePref)) {
+                    getSharedPreferences("lisa_ui", MODE_PRIVATE).edit().putBoolean("lisa_pad_attivo", true).apply();
+                    if (LisaAccessibilityService.getInstance() != null) {
+                        LisaAccessibilityService.getInstance().setDockLato("sx");
                         LisaAccessibilityService.getInstance().mostraDock();
                     }
                 }

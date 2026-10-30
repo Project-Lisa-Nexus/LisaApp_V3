@@ -129,8 +129,15 @@ public class LisaAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         servizioAttivo = true;
-        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> mostraDock(), 1500);
         instance = this;
+        // PUNTO 1: la Dock appare solo se l'ultimo stato salvato era ACCESO.
+        // Se la chiave e' false o assente, non chiamare mostraDock().
+        boolean padAttivo = getSharedPreferences("lisa_ui", android.content.Context.MODE_PRIVATE)
+                .getBoolean("lisa_pad_attivo", false);
+        if (padAttivo) {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .postDelayed(() -> mostraDock(), 1500);
+        }
         // 🟢 Aggancio motore gesture unico
         LisaGestureEngine.init(this);
 
@@ -2871,6 +2878,7 @@ public class LisaAccessibilityService extends AccessibilityService {
         grigliaHandler.post(() -> {
             if (!servizioAttivo) return;
             if (dockView == null) dockView = new LisaDockView(this);
+            if (dockView.isVisibile()) dockView.nascondi();
             dockView.mostra();
         });
     }
