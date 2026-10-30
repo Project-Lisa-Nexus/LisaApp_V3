@@ -2883,6 +2883,13 @@ public class LisaAccessibilityService extends AccessibilityService {
         });
     }
 
+    public void aggiornaDimensioneDock() {
+        grigliaHandler.post(() -> {
+            if (!servizioAttivo || dockView == null) return;
+            dockView.aggiornaDimensione();
+        });
+    }
+
     public void nascondiDock() {
         grigliaHandler.post(() -> {
             if (dockView != null) dockView.nascondi();

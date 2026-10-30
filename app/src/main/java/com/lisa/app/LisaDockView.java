@@ -96,6 +96,46 @@ public final class LisaDockView {
         }
     }
 
+    public void aggiornaDimensione() {
+        if (!visibile || lp == null || wm == null) return;
+        String lato = leggiLato();
+        applicaDimensioni(lato);
+        int sizePx = dp(dimPulsanteDp - 2);
+        int marginPx = dp(1);
+        float textPx = dp(dimPulsanteDp - 2) * 0.60f;
+        for (int i = 0; i < root.getChildCount(); i++) {
+            android.view.View child = root.getChildAt(i);
+            if (child instanceof TextView) ((TextView) child).setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx);
+            if (child instanceof FrameLayout) {
+                for (int k = 0; k < ((FrameLayout) child).getChildCount(); k++) {
+                    android.view.View c = ((FrameLayout) child).getChildAt(k);
+                    if (c instanceof TextView) ((TextView) c).setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx);
+                }
+            }
+            if (child instanceof LinearLayout) {
+                LinearLayout r = (LinearLayout) child;
+                for (int j = 0; j < r.getChildCount(); j++) {
+                    android.view.View cella = r.getChildAt(j);
+                    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(sizePx, sizePx);
+                    p.setMargins(marginPx, marginPx, marginPx, marginPx);
+                    cella.setLayoutParams(p);
+                    if (cella instanceof TextView) ((TextView) cella).setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx);
+                    if (cella instanceof FrameLayout) {
+                        for (int k = 0; k < ((FrameLayout) cella).getChildCount(); k++) {
+                            android.view.View c = ((FrameLayout) cella).getChildAt(k);
+                            if (c instanceof TextView) ((TextView) c).setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx);
+                        }
+                    }
+                }
+                continue;
+            }
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(sizePx, sizePx);
+            p.setMargins(marginPx, marginPx, marginPx, marginPx);
+            child.setLayoutParams(p);
+        }
+        applicaGravity(lato);
+    }
+
     public void nascondi() {
         if (!visibile || wm == null) return;
         try {
@@ -395,7 +435,8 @@ public final class LisaDockView {
         // Normal e Big: valori da definire con te, non ancora fissati.
         int fattorePct = 100;
         dim = dim * fattorePct / 100;
-        dimPulsanteDp = 40;
+        int _dimSalvata = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("pad_dimensione", 36);
+        dimPulsanteDp = Math.max(25, Math.min(160, _dimSalvata));
 
         String _md2 = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_modello", "fissa");
         String _omd2 = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("pad_orientamento", "orizzontale");

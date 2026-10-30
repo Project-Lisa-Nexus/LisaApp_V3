@@ -333,19 +333,24 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
             android.widget.LinearLayout.LayoutParams lpTitle = new android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
             rowTitolo.addView(tvTitolo, lpTitle);
 
+            final boolean isDimensione = "Dimensione".equals(titoloVoce);
             android.widget.TextView tvValore = new android.widget.TextView(this);
-            tvValore.setText("100"); // Default
-            tvValore.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 20);
-            tvValore.setTextColor(0xFF000000);
-            tvValore.setTextColor(0xFF000000); // Nero
-            rowTitolo.addView(tvValore);
+            if (!isDimensione) {
+                // Numero rimosso per le voci non Dimensione
+            }
 
             root.addView(rowTitolo);
 
             // --- INIZIO MIXER ---
             final android.widget.SeekBar seekBar = new android.widget.SeekBar(this);
-            seekBar.setMax(100);
-            seekBar.setProgress(50);
+            if (isDimensione) {
+                seekBar.setMax(100);
+                int _dim = getSharedPreferences("lisa_ui", MODE_PRIVATE).getInt("pad_dimensione", 36);
+                seekBar.setProgress(Math.max(0, Math.min(100, _dim - 20)));
+            } else {
+                seekBar.setMax(100);
+                seekBar.setProgress(50);
+            }
 
             int bluAccent;
             android.util.TypedValue tvAccent = new android.util.TypedValue();
@@ -392,8 +397,8 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
                     dp(60));
             lpFrame.leftMargin = dp(16);
             lpFrame.rightMargin = dp(16);
-            lpFrame.topMargin = dp(16);
-            lpFrame.bottomMargin = dp(24);
+            lpFrame.topMargin = 0;
+            lpFrame.bottomMargin = 0;
             frameSeek.setLayoutParams(lpFrame);
 
             // 1. SeekBar (sotto le tacche)
@@ -403,17 +408,51 @@ public class LisaPadSettingsActivity extends LisaBaseActivity {
             seekLp.gravity = android.view.Gravity.CENTER_VERTICAL;
             frameSeek.addView(seekBar, seekLp);
 
-            root.addView(frameSeek);
+            android.widget.LinearLayout rowSlider = new android.widget.LinearLayout(this);
+            rowSlider.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            rowSlider.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            rowSlider.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dp(60)));
+            android.widget.TextView meno = new android.widget.TextView(this);
+            meno.setText("\u2212");
+            meno.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
+            meno.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+            meno.setTextColor(0xFF000000);
+            meno.setGravity(android.view.Gravity.CENTER);
+            meno.setPadding(dp(12), 0, dp(12), 0);
+            meno.setClickable(false);
+            meno.setFocusable(false);
+            rowSlider.addView(meno);
+            rowSlider.addView(frameSeek, new android.widget.LinearLayout.LayoutParams(0,
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            android.widget.TextView piu = new android.widget.TextView(this);
+            piu.setText("+");
+            piu.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 44);
+            piu.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+            piu.setTextColor(0xFF000000);
+            piu.setGravity(android.view.Gravity.CENTER);
+            piu.setPadding(dp(12), 0, dp(12), 0);
+            piu.setClickable(false);
+            piu.setFocusable(false);
+            rowSlider.addView(piu);
+            root.addView(rowSlider);
 
             seekBar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
                 @Override public void onProgressChanged(android.widget.SeekBar sb, int progress, boolean fromUser) {
+                    if ("Dimensione".equals(tvTitolo.getText().toString())) {
+                        int _v = 20 + progress;
+                        getSharedPreferences("lisa_ui", MODE_PRIVATE).edit().putInt("pad_dimensione", _v).commit();
+                        LisaAccessibilityService _srv = LisaAccessibilityService.getInstance();
+                        if (_srv != null) _srv.aggiornaDimensioneDock();
+                        return;
+                    }
                     int valore;
                     if (progress <= 50) {
                         valore = 40 + Math.round(progress * 60f / 50f);
                     } else {
                         valore = 100 + Math.round((progress - 50) * 100f / 50f);
                     }
-                    tvValore.setText(String.valueOf(valore));
+                    // nessun numero per le altre voci
                 }
                 @Override public void onStartTrackingTouch(android.widget.SeekBar sb) {}
                 @Override public void onStopTrackingTouch(android.widget.SeekBar sb) {}
